@@ -160,7 +160,7 @@ MESSAGES: Dict[str, Dict[str, str]] = {
             "/tz — update timezone via location (on request)\n"
             "/tz Europe/City — set timezone manually\n"
             "/lang — change language"
-            /n/
+            "\n"
             "💡 Heads up: use `:` for time (e.g. 14:30) and `.` or `/` for dates (e.g. 31.08 or 31/08) so I don't get confused."
         ),
         "help": (
