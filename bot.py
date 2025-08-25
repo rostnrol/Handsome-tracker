@@ -502,51 +502,42 @@ def format_tasks(lang: str, tasks: List[Tuple[int, str, datetime, int]]) -> str:
     return "\n".join(lines)
 
 
-def parse_lead_minutes(s: str) -> Optional[int]:
+def parse_lead_minutes(s: str) -> Tuple[Optional[int], str]:
     """
-    Возвращает количество минут или None (если пользователь написал 'нет'/'no'/'off').
-    Поддерживаемые форматы:
-      - '15', '15m', '15 min', '15 мин', '15 минут', '15м'
-      - '1h', '1 h', '1 час', '2 часа', '3ч', 'hours'
-      - комбинированные: '1 ч 30 мин', '1h 30m', '1:30'
+    Парсим длительность вида: '15', '15 мин', '1 ч', '2 часа', '15 m', '1 h' и т.п.
+    Возвращаем (minutes, status), где status ∈ {"ok","disable","empty","invalid"}.
+    - "disable" — явное выключение (нет/no/off/выкл/disable)
+    - "empty"   — пустой ввод
+    - "invalid" — не распознали формат
     """
-    if not s:
-        return None
+    if s is None:
+        return None, "empty"
+    txt = s.strip().lower()
+    if txt == "":
+        return None, "empty"
 
-    txt = s.strip().lower().replace(",", ".")
-    if txt in {"нет", "no", "off", "disable", "disabled"}:
-        return None
+    # явное выключение
+    if txt in {"нет", "no", "off", "выкл", "disable"}:
+        return 0, "disable"
 
-    # 1) Комбинированные записи вида "1 ч 30 мин", "1h 30m"
-    pattern = r'(?P<num>\d+(?:\.\d+)?)\s*(?P<unit>ч|час(?:а|ов)?|h|hr|hrs|hour|hours|м|мин(?:ута|уты|ут)?|m|min|mins|minute|minutes)'
-    total = 0.0
-    found = False
-    for m in re.finditer(pattern, txt):
-        found = True
-        val = float(m.group('num'))
-        unit = m.group('unit')
-        if unit[0] in ('ч', 'h'):
-            total += val * 60
-        else:
-            total += val
-    if found:
-        return int(round(total))
+    m = re.match(r"^\s*(\d+)\s*([a-zа-я.]*)\s*$", txt)
+    if not m:
+        return None, "invalid"
 
-    # 2) Формат '1:30' -> 1 час 30 минут
-    m = re.fullmatch(r'\s*(\d+):(\d{1,2})\s*', txt)
-    if m:
-        return int(m.group(1)) * 60 + int(m.group(2))
+    n = int(m.group(1))
+    unit = m.group(2)
 
-    # 3) Простые форматы '90m', '2h', '45'
-    m = re.fullmatch(r'\s*(\d+)\s*[hH]\s*', txt)
-    if m:
-        return int(m.group(1)) * 60
-    m = re.fullmatch(r'\s*(\d+)\s*(?:[mM]|мин|м)?\s*', txt)
-    if m:
-        return int(m.group(1))
+    hours = {"ч", "час", "часа", "часов", "h", "hr", "hrs", "hour", "hours"}
+    mins  = {"м", "мин", "минута", "минуты", "минут", "m", "min", "mins", "minute", "minutes", ""}
 
-    return None
+    if unit in hours:
+        minutes = n * 60
+    elif unit in mins:
+        minutes = n
+    else:
+        return None, "invalid"
 
+    return minutes, "ok"
 
 def is_commandish(text: str) -> Optional[Tuple[str, List[str]]]:
     """
@@ -718,28 +709,41 @@ async def reminder_toggle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE
     await reschedule_all_reminders(context, chat_id)
     await update.message.reply_text(T(lang, "reminders_on") if enable else T(lang, "reminders_off"))
 
-
 async def remindertime_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    lang = get_chat_settings(chat_id)[-1]
-    payload = update.message.text.replace("/remindertime", "", 1).strip()
+    tzname, hour, minute, lead, enabled, _, lang = get_chat_settings(chat_id)
 
-    if not payload:
-        await update.message.reply_text(T(lang, "lead_invalid"))
+    # всё после первого пробела считаем аргументом
+    parts = update.message.text.split(maxsplit=1)
+    payload = parts[1] if len(parts) == 2 else ""
+
+    minutes, status = parse_lead_minutes(payload)
+
+    if status == "empty":
+        # просто показать текущие настройки, ничего не менять
+        await update.message.reply_text(
+            T(
+                lang,
+                "state_summary",
+                tz=tzname,
+                hh=hour,
+                mm=minute,
+                rem=("on" if (enabled and lang=="en") else ("включены" if enabled else ("off" if lang=="en" else "выключены"))),
+                lead=lead,
+            )
+        )
         return
 
-    minutes = parse_lead_minutes(payload)
-
-    if minutes is None:
-        # Явно выключаем напоминания
+    if status == "disable":
         set_chat_settings(chat_id, reminders_enabled=0)
         await update.message.reply_text(T(lang, "reminders_off"))
         return
 
-    if minutes <= 0 or minutes > 24 * 60:
-        await update.message.reply_text(T(lang, "range_invalid"))
+    if status == "invalid" or minutes is None or minutes < 0 or minutes > 24 * 60:
+        await update.message.reply_text(T(lang, "lead_invalid"))
         return
 
+    # ok: включаем и сохраняем lead
     set_chat_settings(chat_id, remind_lead_min=minutes, reminders_enabled=1)
     await reschedule_all_reminders(context, chat_id)
     await update.message.reply_text(T(lang, "remind_set", lead=minutes))
@@ -850,16 +854,19 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # --- онбординг: напоминания ---
-    if stage == 'ask_reminder':
-        minutes = parse_lead_minutes(text)
-        if minutes is None:
+        if stage == 'ask_reminder':
+        minutes, status = parse_lead_minutes(text)
+
+        if status == "disable":
             set_chat_settings(chat_id, reminders_enabled=0)
             await update.message.reply_text(T(lang, "reminders_off"))
             await ask_summary_time_step(update, context)
             return
-        if minutes < 0 or minutes > 24*60:
-            await update.message.reply_text(T(lang, "range_invalid"))
+
+        if status != "ok" or minutes is None or minutes < 0 or minutes > 24 * 60:
+            await update.message.reply_text(T(lang, "lead_invalid"))
             return
+
         set_chat_settings(chat_id, remind_lead_min=minutes, reminders_enabled=1)
         await reschedule_all_reminders(context, chat_id)
         await update.message.reply_text(T(lang, "remind_set", lead=minutes))
