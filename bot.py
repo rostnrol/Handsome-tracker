@@ -668,75 +668,60 @@ async def lang_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
+
     chat_id = update.effective_chat.id
     tzname, hour, minute, lead, enabled, prefer_no_dt, lang = get_chat_settings(chat_id)
+    stage = context.chat_data.get('onboard_stage')
     text = update.message.text.strip()
 
-    # -------- Онбординг по стадиям --------
-    stage = context.chat_data.get('onboard_stage')
-
-    # 1) Выбор языка
-    if stage == 'lang_select':
+    # --- шаг выбора языка ---
+    if context.chat_data.get('lang_select'):
         msg = text.lower()
         if msg in {"русский", "russian"}:
             set_chat_settings(chat_id, lang="ru")
-            context.chat_data['onboard_stage'] = 'intro_confirm'
+            context.chat_data.pop('lang_select', None)
+            context.chat_data['onboard_stage'] = "ask_tz"
             await update.message.reply_text(MESSAGES['ru']["lang_saved"], reply_markup=ReplyKeyboardRemove())
-            await update.message.reply_text(MESSAGES['ru']["intro_mechanics"])
+            await ask_tz_step(update, context)
             return
         if msg in {"english", "английский"}:
             set_chat_settings(chat_id, lang="en")
-            context.chat_data['onboard_stage'] = 'intro_confirm'
+            context.chat_data.pop('lang_select', None)
+            context.chat_data['onboard_stage'] = "ask_tz"
             await update.message.reply_text(MESSAGES['en']["lang_saved"], reply_markup=ReplyKeyboardRemove())
-            await update.message.reply_text(MESSAGES['en']["intro_mechanics"])
+            await ask_tz_step(update, context)
             return
-        # ask again
+        # неверный ответ → снова показать кнопки
         kb = ReplyKeyboardMarkup(LANG_BTNS, resize_keyboard=True, one_time_keyboard=True)
         await update.message.reply_text(T(lang, "choose_lang_prompt"), reply_markup=kb)
         return
 
-    # 2) Подтверждение "Готов?"
-    if stage == 'intro_confirm':
-        yes = {"да", "ага", "угу", "yes", "y", "ок", "go", "готов", "ready"}
-        no = {"нет", "no", "n"}
-        low = text.lower()
-        if low in yes:
-            await ask_tz_step(update, context)
-            return
-        if low in no:
-            await update.message.reply_text(T(lang, "please_yesno"))
-            return
-        await update.message.reply_text(T(lang, "please_yesno"))
+    # --- шаг выбора таймзоны ---
+    if stage == "ask_tz":
+        raw = text.strip()
+        # формат Region/City
+        if "/" in raw:
+            try:
+                pytz.timezone(raw)  # проверка валидности
+                set_chat_settings(chat_id, tzname=raw)
+                context.chat_data['onboard_stage'] = "ask_reminder"
+                await update.message.reply_text(T(lang, "tz_updated", tz=raw), reply_markup=ReplyKeyboardRemove())
+                await ask_reminder_step(update, context)
+                return
+            except Exception:
+                await update.message.reply_text(T(lang, "tz_invalid"))
+                await ask_tz_step(update, context)
+                return
+        # если невалидный ввод
+        await update.message.reply_text(T(lang, "tz_invalid"))
+        await ask_tz_step(update, context)
         return
 
-    # 3) Стадия TZ
-    if stage == 'ask_tz':
-    raw = text.strip()
-    # 1) Пользователь мог просто написать Europe/Rome (без /tz)
-    if "/" in raw and " " not in raw:
-        try:
-            pytz.timezone(raw)
-            set_chat_settings(chat_id, tzname=raw)
-            await update.message.reply_text(T(lang, "tz_updated", tz=raw), reply_markup=ReplyKeyboardRemove())
-            await schedule_daily_summary(context, chat_id, reschedule=True)
-            await reschedule_all_reminders(context, chat_id)
-            # Переходим к следующему шагу онбординга
-            await ask_reminder_lead_step(update, context)
-            return
-        except Exception:
-            # Неверная зона → подсказка и остаёмся в ask_tz
-            await update.message.reply_text(T(lang, "tz_invalid"))
-            await ask_tz_step(update, context)
-            return
-    # 2) Любой другой текст на этом шаге — повторяем инструкцию с примером
-    await ask_tz_step(update, context)
-    return
-
-    # 4) Вопрос про lead
+    # --- шаг выбора напоминаний ---
     if stage == 'ask_reminder':
         minutes = parse_lead_minutes(text)
         if minutes is None:
-            # выключим напоминания
+            # выключаем напоминания
             set_chat_settings(chat_id, reminders_enabled=0)
             await update.message.reply_text(T(lang, "reminders_off"))
             await ask_summary_time_step(update, context)
@@ -750,7 +735,7 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await ask_summary_time_step(update, context)
         return
 
-    # 5) Вопрос про daily time
+    # --- шаг выбора времени ежедневной сводки ---
     if stage == 'ask_summary_time':
         try:
             hh, mm = map(int, text.split(":"))
@@ -769,7 +754,7 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.chat_data.pop('onboard_stage', None)
         return
 
-    # -------- Обычный режим: добавление задач текстом --------
+    # -------- обычный режим: добавление задач --------
     parsed = parse_task_input(text, tzname)
     if parsed:
         due_utc, task_text, all_day = parsed
@@ -777,10 +762,13 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         due_local = due_utc.astimezone(pytz.timezone(tzname))
         when_str = ("[no time]" if lang=="en" else "[без времени]") if all_day else f"{due_local.strftime('%H:%M')}"
         when_prefix = ("at " if (not all_day and lang=="en") else ("в " if not all_day else ""))
-        await update.message.reply_text(T(lang, "added_task", text=task_text, date=due_local.strftime('%d.%m'), when=(when_prefix+when_str if when_prefix else when_str)))
+        await update.message.reply_text(
+            T(lang, "added_task", text=task_text, date=due_local.strftime('%d.%m'),
+              when=(when_prefix+when_str if when_prefix else when_str))
+        )
         await schedule_task_reminder(context, chat_id, task_id, due_utc)
     else:
-        # ВСЕГДА: без даты/времени — на сегодня (без времени)
+        # без даты/времени → всегда на сегодня (конец дня)
         tzinfo = pytz.timezone(tzname)
         now_local = datetime.now(tzinfo)
         due_local = tzinfo.localize(datetime(now_local.year, now_local.month, now_local.day, 23, 59))
@@ -794,10 +782,123 @@ async def ask_tz_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     lang = get_chat_settings(chat_id)[-1]
     kb = ReplyKeyboardMarkup(
-        [[KeyboardButton(text=("Определить по геолокации" if lang=="ru" else "Detect via geolocation"), request_location=True)]],
+        [[KeyboardButton(text=("Определить по геолокации" if lang=="ru" else "Detect via geolocation"), request_location=True)],
+         [KeyboardButton(text=("Пропустить" if lang=="ru" else "Skip"))]],
         resize_keyboard=True, one_time_keyboard=True,
     )
     await update.message.reply_text(T(lang, "ask_tz"), reply_markup=kb)
     context.chat_data['onboard_stage'] = 'ask_tz'
 
-async def ask_reminder_lead_ste_
+
+async def ask_reminder_lead_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    lang = get_chat_settings(chat_id)[-1]
+    await update.message.reply_text(T(lang, "ask_reminder_lead"), reply_markup=ReplyKeyboardRemove())
+    context.chat_data['onboard_stage'] = 'ask_reminder'
+
+
+async def ask_summary_time_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    lang = get_chat_settings(chat_id)[-1]
+    await update.message.reply_text(T(lang, "ask_summary_time"))
+    context.chat_data['onboard_stage'] = 'ask_summary_time'
+
+# ----------------- Scheduler -----------------
+
+async def schedule_daily_summary(context: ContextTypes.DEFAULT_TYPE, chat_id: int, reschedule: bool = False):
+    tzname, hour, minute, *_ = get_chat_settings(chat_id)
+    tzinfo = pytz.timezone(tzname)
+
+    job_name = f"summary_{chat_id}"
+    if reschedule:
+        for j in context.job_queue.get_jobs_by_name(job_name):
+            j.schedule_removal()
+
+    context.job_queue.run_daily(
+        callback=daily_summary_job,
+        time=time(hour=hour, minute=minute, tzinfo=tzinfo),
+        name=job_name,
+        data={"chat_id": chat_id},
+    )
+
+
+async def daily_summary_job(ctx: ContextTypes.DEFAULT_TYPE):
+    chat_id = ctx.job.data["chat_id"]
+    tzname, _, _, _, _, _, lang = get_chat_settings(chat_id)
+    now_local = datetime.now(pytz.timezone(tzname))
+    tasks = fetch_tasks_for_date(chat_id, now_local, tzname)
+    await ctx.bot.send_message(
+        chat_id=chat_id,
+        text=T(lang, "summary", date=now_local.strftime('%d.%m'), list=format_tasks(lang, tasks)),
+    )
+
+# ----------------- Dev helper: parser smoke tests -----------------
+
+def _run_parser_smoke_tests():
+    samples = [
+        "16:00 08.08 Позвонить маме",
+        "08.08 16:00 Встреча",
+        "август 16.00 созвон",
+        "завтра 09:15 пробежка",
+        "15 сентября 14 00 дедлайн",
+        "15 сентября доклад",   # дата без времени → all_day
+        "сегодня в 18 встреча",
+        "купить хлеб",          # без даты/времени — автодобавление на сегодня
+    ]
+    tzname = DEFAULT_TZ
+    ok = 0
+    for s in samples:
+        try:
+            res = parse_task_input(s, tzname)
+            if s == "купить хлеб":
+                assert res is None
+            elif s == "15 сентября доклад":
+                assert res is not None and res[2] == 1
+            else:
+                assert res is not None
+            ok += 1
+        except Exception as e:
+            print("[TEST FAIL]", s, e)
+    print(f"Parser smoke tests passed: {ok}/{len(samples)}")
+
+# ----------------- Main -----------------
+
+def main():
+    if os.getenv("RUN_PARSER_TESTS") == "1":
+        _run_parser_smoke_tests()
+        return
+
+    init_db()
+    token = os.getenv("BOT_TOKEN")
+    if not token:
+        raise RuntimeError("Set BOT_TOKEN env variable")
+
+    # сбрасываем возможный webhook и висящие апдейты перед стартом polling
+    async def _post_init(app):
+        await app.bot.delete_webhook(drop_pending_updates=True)
+
+    app: Application = (
+        ApplicationBuilder()
+        .token(token)
+        .post_init(_post_init)
+        .build()
+    )
+
+    # команды
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("list", list_cmd))
+    app.add_handler(CommandHandler("tz", tz_cmd))
+    app.add_handler(CommandHandler("reminder", reminder_toggle_cmd))
+    app.add_handler(CommandHandler("remindertime", remindertime_cmd))
+    app.add_handler(CommandHandler("lang", lang_cmd))
+
+    # геолокация и текст
+    app.add_handler(MessageHandler(filters.LOCATION, location_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, any_message))
+
+    app.run_polling(close_loop=False)
+
+
+if __name__ == "__main__":
+    main()
