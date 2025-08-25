@@ -2,51 +2,53 @@
 Telegram Task Tracker Bot
 
 Features:
-- Add tasks via command or plain message: "HH:MM DD.MM Task text"
-- /add HH:MM DD.MM Task text — add a task
-- /today — list today's tasks
-- /on DD.MM — list tasks on a specific day
-- Daily morning summary at 08:00 (per-user) in Europe/Amsterdam timezone by default
-- Simple SQLite storage
+- Добавление задач простым сообщением в свободном формате даты/времени:
+  Примеры: "16:00 08.08 Позвонить", "08.08 16:00 Встреча",
+           "август 16.00 созвон", "завтра 09:15 пробежка",
+           "15 сентября 14 00 дедлайн", "сегодня в 18 встреча"
+- Команды:
+  /add <текст со временем/датой> — добавить задачу
+  /today — список дел на сегодня
+  /on DD.MM — список дел на конкретный день
+  /daily HH:MM — время утренней сводки
+  /tz [IANA] — выставить часовой пояс вручную или по геолокации
+- Утренняя сводка каждый день в выбранное время (по умолчанию 08:00)
+- SQLite-хранилище
 
-Requirements (pip):
+Зависимости (requirements.txt):
 python-telegram-bot==20.7
 pytz==2024.1
 python-dateutil==2.9.0
-
-Run:
-export BOT_TOKEN=123:ABC
-python bot.py
-
-Notes:
-- Default timezone is Europe/Amsterdam. You can change DEFAULT_TZ below.
-- Each chat gets its own daily 08:00 summary job when they /start the bot.
-- You can customize the summary time with /daily HH:MM (optional feature included).
+dateparser==1.2.0
+timezonefinder==6.5.2
 """
 
 import os
 import sqlite3
 from datetime import datetime, time, timedelta
-from dateutil import parser as dateparser
-from dateutil import tz
-import pytz
 from typing import Optional, Tuple, List
 
-from telegram import Update
-from telegram.constants import ParseMode
+import pytz
+from dateparser.search import search_dates
+
+from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     Application,
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
-    filters,
     ContextTypes,
+    filters,
 )
 
+from timezonefinder import TimezoneFinder
+
 DB_PATH = os.getenv("DB_PATH", "tasks.db")
-DEFAULT_TZ = os.getenv("DEFAULT_TZ", "Europe/Amsterdam")
+DEFAULT_TZ = os.getenv("DEFAULT_TZ", "Europe/Rome")
 SUMMARY_HOUR = int(os.getenv("SUMMARY_HOUR", "8"))
 SUMMARY_MINUTE = int(os.getenv("SUMMARY_MINUTE", "0"))
+
+TF = TimezoneFinder()
 
 # ---------- Storage ----------
 
@@ -100,53 +102,72 @@ def set_chat_settings(chat_id: int, tzname: str, hour: int, minute: int):
     con = get_con()
     cur = con.cursor()
     cur.execute(
-        "INSERT INTO settings (chat_id, tz, daily_hour, daily_minute) VALUES (?, ?, ?, ?)\n         ON CONFLICT(chat_id) DO UPDATE SET tz=excluded.tz, daily_hour=excluded.daily_hour, daily_minute=excluded.daily_minute",
+        "INSERT INTO settings (chat_id, tz, daily_hour, daily_minute) VALUES (?, ?, ?, ?)\n"
+        "ON CONFLICT(chat_id) DO UPDATE SET tz=excluded.tz, daily_hour=excluded.daily_hour, daily_minute=excluded.daily_minute",
         (chat_id, tzname, hour, minute),
     )
     con.commit()
     con.close()
 
 
-def parse_task_input(text: str, chat_tz: str) -> Optional[Tuple[datetime, str]]:
-    """
-    Expect formats like:
-    - "HH:MM DD.MM Task text"
-    - "HH:MM DD.MM" + newline + "Task text"
-    Returns (due_dt_utc, task_text) or None
-    """
-    text = text.strip()
-    if "\n" in text:
-        header, body = text.split("\n", 1)
-        candidate = f"{header} {body.strip()}"
-    else:
-        candidate = text
-
-    # Split once on the first space after date
-    # First two tokens should be time and date
-    parts = candidate.split(maxsplit=2)
-    if len(parts) < 3:
-        return None
-    hhmm, ddmm, task_text = parts[0], parts[1], parts[2].strip()
-
+def tz_from_location(lat: float, lon: float) -> Optional[str]:
     try:
-        # validate time
-        hh, mm = hhmm.split(":")
-        hour, minute = int(hh), int(mm)
-        # validate date
-        dd, mm_ = ddmm.split(".")
-        day, month = int(dd), int(mm_)
-
-        now_local = datetime.now(pytz.timezone(chat_tz))
-        year = now_local.year
-        # If date already passed this year, assume next year
-        candidate_local = pytz.timezone(chat_tz).localize(datetime(year, month, day, hour, minute))
-        if candidate_local < now_local - timedelta(minutes=1):
-            candidate_local = candidate_local.replace(year=year + 1)
-
-        due_utc = candidate_local.astimezone(pytz.utc)
-        return due_utc, task_text
+        tzname = TF.timezone_at(lng=lon, lat=lat)
+        return tzname
     except Exception:
         return None
+
+
+def parse_task_input(text: str, chat_tz: str) -> Optional[Tuple[datetime, str]]:
+    """
+    Гибкий парсер даты/времени + текста задачи.
+    Понимает варианты:
+    - "16:00 08.08 Позвонить"
+    - "08.08 16:00 Встреча"
+    - "август 16.00 созвон"
+    - "завтра 09:15 пробежка"
+    - "15 сентября 14 00 дедлайн"
+    - "сегодня в 18 встреча"
+    Возвращает (due_utc, task_text) или None.
+    """
+    tzinfo = pytz.timezone(chat_tz)
+    now_local = datetime.now(tzinfo)
+
+    settings = {
+        "TIMEZONE": chat_tz,
+        "RETURN_AS_TIMEZONE_AWARE": True,
+        "PREFER_DATES_FROM": "future",   # без года — ближайшее будущее
+        "DATE_ORDER": "DMY",
+        "RELATIVE_BASE": now_local,      # для "сегодня/завтра/через 2 часа"
+    }
+
+    # Ищем первую дату/время на RU/EN/IT
+    results = search_dates(
+        text,
+        languages=["ru", "en", "it"],
+        settings=settings
+    )
+    if not results:
+        return None
+
+    matched_span, dt = results[0]  # ('завтра 16:00', datetime...)
+    if dt.tzinfo is None:
+        dt = tzinfo.localize(dt)
+
+    # Остаток — текст задачи
+    task_text = text.replace(matched_span, "").strip(" -—:,.;")
+    if not task_text:
+        task_text = "Без названия"
+
+    due_utc = dt.astimezone(pytz.utc)
+    # Если ушло в прошлое (редко бывает из-за распознавания) — сдвиг на год вперёд
+    if due_utc < datetime.now(pytz.utc) - timedelta(minutes=1):
+        try:
+            due_utc = due_utc.replace(year=due_utc.year + 1)
+        except ValueError:
+            pass
+
+    return due_utc, task_text
 
 
 def save_task(chat_id: int, due_utc: datetime, text: str):
@@ -202,7 +223,6 @@ def format_tasks(tasks: List[Tuple[int, str, datetime]]) -> str:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    # ensure DB and default settings
     init_db()
     tzname, hour, minute = get_chat_settings(chat_id)
     set_chat_settings(chat_id, tzname, hour, minute)
@@ -211,14 +231,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await schedule_daily_summary(context, chat_id)
 
     await update.message.reply_text(
-        "Привет! Я трекер задач. Кидай мне в сообщении:\n"
-        "HH:MM DD.MM Текст задачи\n\n"
+        "Привет! Я трекер задач. Кидай мне сообщение с датой/временем и текстом, например:\n"
+        "16:00 08.08 Позвонить маме\n"
+        "или: завтра 09:15 пробежка / сегодня в 18 встреча / 15 сентября 14 00 дедлайн\n\n"
         "Команды:\n"
-        "/add HH:MM DD.MM Текст — добавить задачу\n"
+        "/add <текст с датой и временем> — добавить задачу\n"
         "/today — дела на сегодня\n"
         "/on DD.MM — дела на конкретный день\n"
         "/daily HH:MM — время утренней сводки (по умолчанию 08:00)\n"
+        "/tz [IANA] — выставить часовой пояс или поделиться геолокацией\n"
         f"Текущий часовой пояс: {tzname}"
+    )
+
+    # предложить автоопределение TZ
+    kb = ReplyKeyboardMarkup(
+        [[KeyboardButton(text="Определить по геолокации", request_location=True)]],
+        resize_keyboard=True, one_time_keyboard=True
+    )
+    await update.message.reply_text(
+        "Хочешь, подберу твой часовой пояс по геолокации? Нажми кнопку ниже.",
+        reply_markup=kb
     )
 
 
@@ -229,7 +261,7 @@ async def add_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     payload = text[len("/add"):].strip()
     parsed = parse_task_input(payload, tzname)
     if not parsed:
-        await update.message.reply_text("Не понял формат. Пример: /add 14:30 15.08 Позвонить маме")
+        await update.message.reply_text("Не понял формат. Пример: /add завтра 16:00 Позвонить маме")
         return
     due_utc, task_text = parsed
     save_task(chat_id, due_utc, task_text)
@@ -253,7 +285,7 @@ async def on_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     tzname, *_ = get_chat_settings(chat_id)
     args = update.message.text.split()
-    if len(args) != 2:
+    if len(args) != 2 or "." not in args[1]:
         await update.message.reply_text("Формат: /on DD.MM")
         return
     try:
@@ -287,9 +319,55 @@ async def daily_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     tzname, _, _ = get_chat_settings(chat_id)
     set_chat_settings(chat_id, tzname, hh, mm)
-    # reschedule
     await schedule_daily_summary(context, chat_id, reschedule=True)
     await update.message.reply_text(f"Сводка будет приходить в {hh:02d}:{mm:02d} по {tzname}")
+
+
+async def tz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    args = update.message.text.split(maxsplit=1)
+    if len(args) == 2:
+        tzname = args[1].strip()
+        try:
+            pytz.timezone(tzname)  # валидация
+            _, hour, minute = get_chat_settings(chat_id)
+            set_chat_settings(chat_id, tzname, hour, minute)
+            await update.message.reply_text(f"Часовой пояс обновлён: {tzname}")
+            await schedule_daily_summary(context, chat_id, reschedule=True)
+        except Exception:
+            await update.message.reply_text("Не знаю такой зоны. Пример: /tz Europe/Rome")
+        return
+
+    kb = ReplyKeyboardMarkup(
+        [[KeyboardButton(text="Определить по геолокации", request_location=True)]],
+        resize_keyboard=True, one_time_keyboard=True
+    )
+    await update.message.reply_text(
+        "Поделись геолокацией, чтобы я выставил твой часовой пояс автоматически.",
+        reply_markup=kb
+    )
+
+
+async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.location:
+        return
+    chat_id = update.effective_chat.id
+    lat = update.message.location.latitude
+    lon = update.message.location.longitude
+    tzname = tz_from_location(lat, lon)
+    if not tzname:
+        await update.message.reply_text(
+            "Не удалось определить часовой пояс по геолокации :(",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return
+    _, hour, minute = get_chat_settings(chat_id)
+    set_chat_settings(chat_id, tzname, hour, minute)
+    await update.message.reply_text(
+        f"Готово! Выставил часовой пояс: {tzname}",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    await schedule_daily_summary(context, chat_id, reschedule=True)
 
 
 async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -307,7 +385,8 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         await update.message.reply_text(
-            "Не понял. Формат: HH:MM DD.MM Задача. Либо используй /add, /today, /on"
+            "Не понял. Напиши дату/время и текст задачи (например: завтра 16:00 Позвонить) "
+            "или используй /add, /today, /on"
         )
 
 
@@ -319,12 +398,10 @@ async def schedule_daily_summary(context: ContextTypes.DEFAULT_TYPE, chat_id: in
 
     job_name = f"summary_{chat_id}"
     if reschedule:
-        # remove old if exists
         old = context.job_queue.get_jobs_by_name(job_name)
         for j in old:
             j.schedule_removal()
 
-    # schedule a new one
     context.job_queue.run_daily(
         callback=daily_summary_job,
         time=time(hour=hour, minute=minute, tzinfo=tzinfo),
@@ -357,7 +434,9 @@ def main():
     app.add_handler(CommandHandler("today", today_cmd))
     app.add_handler(CommandHandler("on", on_cmd))
     app.add_handler(CommandHandler("daily", daily_cmd))
+    app.add_handler(CommandHandler("tz", tz_cmd))
 
+    app.add_handler(MessageHandler(filters.LOCATION, location_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, any_message))
 
     app.run_polling(close_loop=False)
