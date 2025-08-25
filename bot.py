@@ -51,15 +51,15 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "lang_saved": "Готово! Язык: Русский.",
         "intro_mechanics": (
             "Как я работаю:\n"
-            "• Пиши задачи обычным текстом — я понимаю даты и время в свободном формате.\n"
-            "• Если пишешь без даты/времени — добавлю в список на сегодня.\n"
-            "• Для задач со временем шлются напоминания заранее — как настроишь.\n"
-            "• Каждое утро пришлю список дел на день.\n\n"
+            "💡 Пиши задачи обычным текстом — я понимаю даты и время в свободном формате.\n"
+            "💡 Если пишешь без даты/времени — добавлю в список на сегодня.\n"
+            "💡 Для задач со временем шлются напоминания заранее — как настроишь.\n"
+            "💡 Каждое утро присылаю список дел на день.\n\n"
             "Готов?"
         ),
         "ask_tz": (
             "Отправь геолокацию — настрою часовой пояс автоматически.\n"
-            "Или введи вручную в формате `Continent/City`, например: `/tz Europe/Moscow`."
+            "Или введи вручную в формате `Continent/City`, например: /tz Europe/Rome."
         ),
         "ask_reminder_lead": (
             "За сколько времени до задачи присылать напоминание?\n"
@@ -70,16 +70,17 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         ),
         "setup_done_title": "Готово! Всё настроено ✅",
         "setup_done_body": (
-            "Имей в виду: время пиши с `:` (например 14:30), а дату с `.` или `/` (например 31.08 или 31/08) — так я не запутаюсь.\n\n"
             "Команды:\n"
             "/list — список на сегодня\n"
             "/list DD.MM — список на указанную дату\n"
             "/list time HH:MM — во сколько присылать ежедневный список\n"
             "/reminder on|off — включить/выключить напоминания\n"
-            "/remindertime <15 мин|1 ч> — за сколько напоминать\n"
-            "/tz — обновить таймзону по геолокации (по запросу)\n"
-            "/tz Europe/City — выставить таймзону вручную\n"
+            "/remindertime 15 мин|1 ч — за сколько напоминать\n"
+            "/tz — обновить таймзону по геолокации\n"
+            "/tz Europe/Rome — выставить таймзону вручную\n"
             "/lang — сменить язык"
+            "\n"
+            "💡 Важно: в задачах используй двоеточие для времени (`16:30`), а точку или слэш для даты (`31.08`, `31/08`). Так я точно не перепутаю дату со временем."
         ),
         "help": (
             "Команды:\n"
@@ -98,7 +99,7 @@ MESSAGES: Dict[str, Dict[str, str]] = {
             "Сводка: {hh:02d}:{mm:02d}\n"
             "Напоминания: {rem} за {lead} мин"
         ),
-        "daily_set": "Сводка будет приходить в {hh:02d}:{mm:02d} по {tz}.",
+        "daily_set": "Список будет приходить в {hh:02d}:{mm:02d} по {tz}.",
         "remind_set": "Напоминания будут приходить за {lead} мин до задачи.",
         "reminders_on": "Напоминания: включены.",
         "reminders_off": "Напоминания: выключены.",
@@ -117,7 +118,7 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "dt_invalid_strict": "Дата/время некорректны. Пиши время с `:` (например 14:30) и дату с `.` или `/` (например 31.08).",
         "lead_invalid": "Не понял длительность. Примеры: `15 мин`, `1 ч`, `30 m`, `2 h`, `нет`.",
         "range_invalid": "Значение вне диапазона (0..1440).",
-        "tz_invalid": "Не знаю такой зоны. Пример: `/tz Europe/Moscow`.",
+        "tz_invalid": "Не знаю такой зоны. Пример: /tz Europe/Rome.",
         "tip_setup": "Подсказка: /tz → /remindertime → /list time.",
     },
     "en": {
@@ -131,15 +132,15 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "lang_saved": "Done! Language: English.",
         "intro_mechanics": (
             "How I work:\n"
-            "• Send tasks as plain text — I parse dates & times naturally.\n"
-            "• If there's no date/time — I'll add it for today.\n"
-            "• Tasks with time get advance reminders (configurable).\n"
-            "• Every morning you'll get the daily list.\n\n"
+            "💡 Send tasks as plain text — I parse dates & times naturally.\n"
+            "💡 If there's no date/time — I'll add it for today.\n"
+            "💡 Tasks with time get advance reminders (configurable).\n"
+            "💡 Every morning you'll get the daily list.\n\n"
             "Ready?"
         ),
         "ask_tz": (
             "Share your location to auto-set your timezone.\n"
-            "Or set it manually as `Continent/City`, e.g. `/tz Europe/London`."
+            "Or set it manually, e.g. /tz Europe/Rome."
         ),
         "ask_reminder_lead": (
             "How long before a task should I remind you?\n"
@@ -150,7 +151,6 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         ),
         "setup_done_title": "All set! ✅",
         "setup_done_body": (
-            "Heads up: use `:` for time (e.g. 14:30) and `.` or `/` for dates (e.g. 31.08 or 31/08) so I don't get confused.\n\n"
             "Commands:\n"
             "/list — today's tasks\n"
             "/list DD.MM — tasks for a given date\n"
@@ -160,6 +160,8 @@ MESSAGES: Dict[str, Dict[str, str]] = {
             "/tz — update timezone via location (on request)\n"
             "/tz Europe/City — set timezone manually\n"
             "/lang — change language"
+            /n/
+            "💡 Heads up: use `:` for time (e.g. 14:30) and `.` or `/` for dates (e.g. 31.08 or 31/08) so I don't get confused."
         ),
         "help": (
             "Commands:\n"
@@ -501,18 +503,49 @@ def format_tasks(lang: str, tasks: List[Tuple[int, str, datetime, int]]) -> str:
 
 
 def parse_lead_minutes(s: str) -> Optional[int]:
+    """
+    Возвращает количество минут или None (если пользователь написал 'нет'/'no'/'off').
+    Поддерживаемые форматы:
+      - '15', '15m', '15 min', '15 мин', '15 минут', '15м'
+      - '1h', '1 h', '1 час', '2 часа', '3ч', 'hours'
+      - комбинированные: '1 ч 30 мин', '1h 30m', '1:30'
+    """
     if not s:
         return None
-    txt = s.strip().lower()
-    if txt in {"нет", "no", "off"}:
+
+    txt = s.strip().lower().replace(",", ".")
+    if txt in {"нет", "no", "off", "disable", "disabled"}:
         return None
-    num = "".join(ch for ch in txt if ch.isdigit())
-    if not num:
-        return None
-    n = int(num)
-    if any(u in txt for u in ["ч", "час", "hours", "hour", "h"]):
-        return n * 60
-    return n
+
+    # 1) Комбинированные записи вида "1 ч 30 мин", "1h 30m"
+    pattern = r'(?P<num>\d+(?:\.\d+)?)\s*(?P<unit>ч|час(?:а|ов)?|h|hr|hrs|hour|hours|м|мин(?:ута|уты|ут)?|m|min|mins|minute|minutes)'
+    total = 0.0
+    found = False
+    for m in re.finditer(pattern, txt):
+        found = True
+        val = float(m.group('num'))
+        unit = m.group('unit')
+        if unit[0] in ('ч', 'h'):
+            total += val * 60
+        else:
+            total += val
+    if found:
+        return int(round(total))
+
+    # 2) Формат '1:30' -> 1 час 30 минут
+    m = re.fullmatch(r'\s*(\d+):(\d{1,2})\s*', txt)
+    if m:
+        return int(m.group(1)) * 60 + int(m.group(2))
+
+    # 3) Простые форматы '90m', '2h', '45'
+    m = re.fullmatch(r'\s*(\d+)\s*[hH]\s*', txt)
+    if m:
+        return int(m.group(1)) * 60
+    m = re.fullmatch(r'\s*(\d+)\s*(?:[mM]|мин|м)?\s*', txt)
+    if m:
+        return int(m.group(1))
+
+    return None
 
 
 def is_commandish(text: str) -> Optional[Tuple[str, List[str]]]:
@@ -690,18 +723,26 @@ async def remindertime_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     lang = get_chat_settings(chat_id)[-1]
     payload = update.message.text.replace("/remindertime", "", 1).strip()
+
+    if not payload:
+        await update.message.reply_text(T(lang, "lead_invalid"))
+        return
+
     minutes = parse_lead_minutes(payload)
+
     if minutes is None:
+        # Явно выключаем напоминания
         set_chat_settings(chat_id, reminders_enabled=0)
         await update.message.reply_text(T(lang, "reminders_off"))
         return
-    if minutes < 0 or minutes > 24*60:
+
+    if minutes <= 0 or minutes > 24 * 60:
         await update.message.reply_text(T(lang, "range_invalid"))
         return
+
     set_chat_settings(chat_id, remind_lead_min=minutes, reminders_enabled=1)
     await reschedule_all_reminders(context, chat_id)
     await update.message.reply_text(T(lang, "remind_set", lead=minutes))
-
 
 async def tz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
