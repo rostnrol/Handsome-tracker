@@ -4,7 +4,7 @@ Telegram Task Tracker Bot
 
 Тезисы:
 - Пиши задачи свободным текстом: "завтра 16:00 созвон", "08.09 купить билеты", "позвонить маме"
-- Без даты/времени — автоматически добавлю в список на сегодня (без времени)
+- Без даты/времени — автоматически добавлю в список на сегодня
 - Для задач с временем приходят напоминания заранее (настраивается)
 - Каждое утро приходит список дел (время настраивается)
 """
@@ -56,15 +56,14 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "intro_mechanics": (
             "Как я работаю:\n"
             "📜 Пиши задачи обычным текстом — я понимаю даты и время в свободном формате.\n"
-            "📜 Если пишешь |без| даты и времени — просто добавлю в общий список дед на сегодня.\n"
-            "📜 Для задач, где указано время, могу прислать напоминание заранее — как настроишь.\n"
-            "📜 Каждое утро пришлю список дел на день.\n\n"
+            "📜 Если пишешь без даты и времени — добавлю в список дел на сегодня.\n"
+            "📜 Для задач со временем пришлю напоминание заранее — как настроишь.\n"
+            "📜 Каждое утро присылаю список дел на день.\n\n"
             "Готов?"
         ),
         "ask_tz": (
             "Отправь геолокацию — я настрою твой часовой пояс автоматически.\n"
-            "Если не получается, используй: `/tz Europe/Rome` (континент/город).\n"
-            "Например: `/tz Europe/Rome`."
+            "Или введи вручную в формате `Continent/City`, например: `Europe/Moscow`."
         ),
         "ask_reminder_lead": (
             "За сколько времени до задачи присылать напоминание?\n"
@@ -84,7 +83,7 @@ MESSAGES: Dict[str, Dict[str, str]] = {
             "/reminder on|off — включить/выключить напоминания\n"
             "/remindertime <15 мин|1 ч> — за сколько напоминать\n"
             "/tz — обновить таймзону по геолокации (по запросу)\n"
-            "/tz Europe/Rome — выставить таймзону вручную\n"
+            "/tz Europe/City — выставить таймзону вручную\n"
             "/lang — сменить язык"
         ),
         "state_summary": (
@@ -100,8 +99,9 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "tz_updated": "Часовой пояс обновлён: {tz}.",
         "tz_geo_prompt": "Поделись геолокацией, чтобы я выставил твой часовой пояс автоматически.",
         "tz_geo_fail": "Не удалось определить часовой пояс.",
-        "added_today_nodt": "Добавил на сегодня [без времени]: {text}",
-        "added_task": "Ок, добавил: {text}\nНа {date} {when}",
+        "added_today_nodt": "Добавил на сегодня: {text}",
+        "added_task_with_time": "Ок, добавил: {text}\nНа {date} в {when}",
+        "added_task_all_day": "Ок, добавил: {text}\nНа {date}",
         "today_list": "Задачи на сегодня ({date}):\n{list}",
         "on_list": "Задачи на {date}:\n{list}",
         "empty": "Пока пусто",
@@ -111,7 +111,7 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "time_invalid": "Время некорректно. Пример: `09:30`.",
         "lead_invalid": "Не понял длительность. Примеры: `15 мин`, `1 ч`, `30 m`, `2 h`, `нет`.",
         "range_invalid": "Значение вне диапазона (0..1440).",
-        "tz_invalid": "Не знаю такой зоны. Пример: `/tz Europe/Rome`.",
+        "tz_invalid": "Не знаю такой зоны. Пример: `Europe/Moscow`.",
         "tip_setup": "Подсказка: /tz → /remindertime → /list time.",
         "please_yesno": "Ответь, пожалуйста: «да/yes» или «нет/no».",
     },
@@ -128,15 +128,14 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "intro_mechanics": (
             "How I work:\n"
             "📜 Send tasks as plain text — I parse dates & times in natural language.\n"
-            "📜 If you send |no| date/time — I'll just add it for today.\n"
+            "📜 If you send no date/time — I'll add it for today.\n"
             "📜 Tasks that have a time will trigger reminders in advance — as you configure.\n"
             "📜 Every morning you'll get the daily list.\n\n"
             "Ready?"
         ),
         "ask_tz": (
             "Share your location to auto-set your timezone.\n"
-            "Prefer not to share? Use `/tz Europe/Rome` (Continent/City) instead.\n"
-            "For example: `/tz Europe/Rome`."
+            "Or type `Continent/City`, e.g.: `Europe/London`."
         ),
         "ask_reminder_lead": (
             "How long before a task should I remind you?\n"
@@ -147,14 +146,13 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         ),
         "setup_done_title": "All set! ✅",
         "setup_done_body": "Here are the commands:",
-        # Commands / Help
         "help": (
             "Commands:\n"
             "/list — today's tasks\n"
             "/list DD.MM — tasks for a given date\n"
             "/list time HH:MM — set daily summary time\n"
             "/tz — update timezone via location (on request)\n"
-            "/tz Europe/Rome — set a specific timezone manually\n"
+            "/tz Europe/City — set timezone manually\n"
             "/reminder on|off — enable/disable reminders\n"
             "/remindertime <15 min|1 h> — reminder lead time\n"
             "/lang — change language"
@@ -164,7 +162,6 @@ MESSAGES: Dict[str, Dict[str, str]] = {
             "Summary: {hh:02d}:{mm:02d}\n"
             "Reminders: {rem}, lead {lead} min"
         ),
-        # Status
         "daily_set": "Daily summary at {hh:02d}:{mm:02d} ({tz}).",
         "remind_set": "Reminders will arrive {lead} minutes before a task.",
         "reminders_on": "Reminders: enabled.",
@@ -172,8 +169,9 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "tz_updated": "Timezone updated: {tz}.",
         "tz_geo_prompt": "Share your location to set your timezone automatically.",
         "tz_geo_fail": "Couldn't determine timezone.",
-        "added_today_nodt": "Added for today [no time]: {text}",
-        "added_task": "Done: {text}\nFor {date} {when}",
+        "added_today_nodt": "Added for today: {text}",
+        "added_task_with_time": "Done: {text}\nFor {date} at {when}",
+        "added_task_all_day": "Done: {text}\nFor {date}",
         "today_list": "Today's tasks ({date}):\n{list}",
         "on_list": "Tasks for {date}:\n{list}",
         "empty": "Nothing yet",
@@ -183,7 +181,7 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "time_invalid": "Invalid time, e.g. `09:30`.",
         "lead_invalid": "Couldn't parse duration. Examples: `15 min`, `1 h`, `30 м`, `2 ч`, `no`.",
         "range_invalid": "Value out of range (0..1440).",
-        "tz_invalid": "Unknown zone. Example: `/tz Europe/Rome`.",
+        "tz_invalid": "Unknown zone. Example: `Europe/London`.",
         "tip_setup": "Tip: /tz → /remindertime → /list time.",
         "please_yesno": "Please reply `yes` or `no`.",
     },
@@ -406,7 +404,7 @@ def format_tasks(lang: str, tasks: List[Tuple[int, str, datetime, int]]) -> str:
     lines = []
     for _id, text, due_local, all_day in tasks:
         if all_day:
-            lines.append(f"• [no time] — {text}" if lang == "en" else f"• [без времени] — {text}")
+            lines.append(f"• {text}")  # без метки
         else:
             lines.append(f"• {due_local.strftime('%H:%M')} — {text}")
     return "\n".join(lines)
@@ -619,19 +617,17 @@ async def tz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         except Exception:
             await update.message.reply_text(T(lang, "tz_invalid"))
-            # ВАЖНО: остаёмся в ask_tz и снова показываем пример
+            # остаёмся в ask_tz и снова показываем пример
             await ask_tz_step(update, context)
             return
 
-    # Если /tz без аргумента — просто снова подсказываем правильный формат
+    # Если /tz без аргумента — подсказываем формат и просим гео
     await ask_tz_step(update, context)
-
     kb = ReplyKeyboardMarkup(
         [[KeyboardButton(text=("Определить по геолокации" if lang=="ru" else "Detect via geolocation"), request_location=True)]],
         resize_keyboard=True, one_time_keyboard=True,
     )
     await update.message.reply_text(T(lang, "tz_geo_prompt"), reply_markup=kb)
-    # mark stage if onboarding
     if context.chat_data.get('onboard_stage') in (None, 'intro_confirm'):
         context.chat_data['onboard_stage'] = 'ask_tz'
 
@@ -665,6 +661,8 @@ async def lang_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.chat_data['onboard_stage'] = 'lang_select'
 
 
+# ----------------- Any Message -----------------
+
 async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
@@ -674,7 +672,7 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stage = context.chat_data.get('onboard_stage')
     text = update.message.text.strip()
 
-    # --- шаг выбора языка ---
+    # 1) выбор языка
     if stage == "lang_select":
         msg = text.lower()
         if msg in {"русский", "russian"}:
@@ -689,12 +687,33 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(MESSAGES['en']["lang_saved"], reply_markup=ReplyKeyboardRemove())
             await ask_tz_step(update, context)
             return
-        # неверный ответ → снова показать кнопки
         kb = ReplyKeyboardMarkup(LANG_BTNS, resize_keyboard=True, one_time_keyboard=True)
         await update.message.reply_text(T(lang, "choose_lang_prompt"), reply_markup=kb)
         return
 
-    # --- шаг выбора таймзоны ---
+    # 2) текст, похожий на команды без "/" — обработать как команды
+    low = text.lower()
+    if low.startswith("list") or low == "help" or low.startswith("tz") or low.startswith("reminder") or low.startswith("remindertime") or low == "lang":
+        if low.startswith("list"):
+            update.message.text = "/" + text
+            await list_cmd(update, context); return
+        if low.startswith("tz"):
+            update.message.text = "/" + text
+            await tz_cmd(update, context); return
+        if low.startswith("reminder"):
+            update.message.text = "/" + text
+            await reminder_toggle_cmd(update, context); return
+        if low.startswith("remindertime"):
+            update.message.text = "/" + text
+            await remindertime_cmd(update, context); return
+        if low == "help":
+            update.message.text = "/help"
+            await help_cmd(update, context); return
+        if low == "lang":
+            update.message.text = "/lang"
+            await lang_cmd(update, context); return
+
+    # 3) шаги онбординга
     if stage == "ask_tz":
         raw = text.strip()
         if "/" in raw:
@@ -713,11 +732,9 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await ask_tz_step(update, context)
         return
 
-    # --- шаг выбора напоминаний ---
     if stage == 'ask_reminder':
         minutes = parse_lead_minutes(text)
         if minutes is None:
-            # выключаем напоминания
             set_chat_settings(chat_id, reminders_enabled=0)
             await update.message.reply_text(T(lang, "reminders_off"))
             await ask_summary_time_step(update, context)
@@ -731,7 +748,6 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await ask_summary_time_step(update, context)
         return
 
-    # --- шаг выбора времени ежедневной сводки ---
     if stage == 'ask_summary_time':
         try:
             hh, mm = map(int, text.split(":"))
@@ -743,25 +759,26 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_chat_settings(chat_id, hour=hh, minute=mm)
         await schedule_daily_summary(context, chat_id, reschedule=True)
         await update.message.reply_text(T(lang, "daily_set", hh=hh, mm=mm, tz=tzname))
-        # Финальная карточка
         await update.message.reply_text(
             f"{T(lang, 'setup_done_title')}\n\n{T(lang, 'setup_done_body')}\n\n{T(lang, 'help')}"
         )
         context.chat_data.pop('onboard_stage', None)
         return
 
-    # -------- обычный режим: добавление задач --------
+    # 4) обычный режим: добавление задач
     parsed = parse_task_input(text, tzname)
     if parsed:
         due_utc, task_text, all_day = parsed
         task_id = save_task(chat_id, due_utc, task_text, all_day)
         due_local = due_utc.astimezone(pytz.timezone(tzname))
-        when_str = ("[no time]" if lang=="en" else "[без времени]") if all_day else f"{due_local.strftime('%H:%M')}"
-        when_prefix = ("at " if (not all_day and lang=="en") else ("в " if not all_day else ""))
-        await update.message.reply_text(
-            T(lang, "added_task", text=task_text, date=due_local.strftime('%d.%m'),
-              when=(when_prefix+when_str if when_prefix else when_str))
-        )
+        if all_day:
+            await update.message.reply_text(
+                T(lang, "added_task_all_day", text=task_text, date=due_local.strftime('%d.%m'))
+            )
+        else:
+            await update.message.reply_text(
+                T(lang, "added_task_with_time", text=task_text, date=due_local.strftime('%d.%m'), when=due_local.strftime('%H:%M'))
+            )
         await schedule_task_reminder(context, chat_id, task_id, due_utc)
     else:
         # без даты/времени → всегда на сегодня (конец дня)
@@ -778,8 +795,8 @@ async def ask_tz_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     lang = get_chat_settings(chat_id)[-1]
     kb = ReplyKeyboardMarkup(
-        [[KeyboardButton(text=("Определить по геолокации" if lang=="ru" else "Detect via geolocation"), request_location=True)],
-         [KeyboardButton(text=("Пропустить" if lang=="ru" else "Skip"))]],
+        [[KeyboardButton(text=("Определить по геолокации" if lang=="ru" else "Detect via geolocation"),
+                         request_location=True)]],
         resize_keyboard=True, one_time_keyboard=True,
     )
     await update.message.reply_text(T(lang, "ask_tz"), reply_markup=kb)
