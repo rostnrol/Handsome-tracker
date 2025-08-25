@@ -1,12 +1,7 @@
+# bot.py
 """
 Telegram Task Tracker Bot
 Авто-TZ · Гибкий парсер · Напоминания · Онбординг по одному вопросу · Мультиязык (RU/EN)
-
-Тезисы:
-- Пиши задачи свободным текстом: "завтра 16:00 созвон", "08.09 купить билеты", "позвонить маме"
-- Без даты/времени — автоматически добавлю в список на сегодня (без времени)
-- Для задач с временем приходят напоминания заранее (настраивается)
-- Каждое утро приходит список дел (время настраивается)
 """
 
 import os
@@ -41,6 +36,7 @@ DEFAULT_LANG = os.getenv("DEFAULT_LANG", "ru")  # 'ru' or 'en'
 
 TF = TimezoneFinder()
 
+
 # ----------------- i18n -----------------
 
 MESSAGES: Dict[str, Dict[str, str]] = {
@@ -55,38 +51,47 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "lang_saved": "Готово! Язык: Русский.",
         "intro_mechanics": (
             "Как я работаю:\n"
-            "📜 Пиши задачи обычным текстом — я понимаю даты и время в свободном формате.\n"
-            "📜 Если пишешь без даты и времени — просто добавлю в список дел на сегодня.\n"
-            "📜 Для задач, где указано время, могу прислать напоминание заранее — как настроишь.\n"
-            "📜 Каждое утро пришлю список дел на день.\n\n"
+            "• Пиши задачи обычным текстом — я понимаю даты и время в свободном формате.\n"
+            "• Если пишешь без даты/времени — добавлю в список на сегодня.\n"
+            "• Для задач со временем шлются напоминания заранее — как настроишь.\n"
+            "• Каждое утро пришлю список дел на день.\n\n"
             "Готов?"
         ),
         "ask_tz": (
-            "Отправь геолокацию — я настрою твой часовой пояс автоматически.\n"
-            "Если не получается, используй: `/tz Europe/City` (континент/город), например: `/tz Europe/Moscow`."
+            "Отправь геолокацию — настрою часовой пояс автоматически.\n"
+            "Или введи вручную в формате `Continent/City`, например: `/tz Europe/Moscow`."
         ),
         "ask_reminder_lead": (
             "За сколько времени до задачи присылать напоминание?\n"
             "Напиши, например: `15 мин`, `30 мин`, `1 ч`. Если не нужны — ответь «нет»."
         ),
         "ask_summary_time": (
-            "Во сколько присылать утренний список дел? Напиши время в формате `HH:MM`, например `09:00`."
+            "Во сколько присылать утренний список дел? Введи время `HH:MM`, например `09:00`."
         ),
         "setup_done_title": "Готово! Всё настроено ✅",
-        "setup_done_body": "Вот что доступно:",
+        "setup_done_body": (
+            "Имей в виду: время пиши с `:` (например 14:30), а дату с `.` или `/` (например 31.08 или 31/08) — так я не запутаюсь.\n\n"
+            "Команды:\n"
+            "/list — список на сегодня\n"
+            "/list DD.MM — список на указанную дату\n"
+            "/list time HH:MM — во сколько присылать ежедневный список\n"
+            "/reminder on|off — включить/выключить напоминания\n"
+            "/remindertime <15 мин|1 ч> — за сколько напоминать\n"
+            "/tz — обновить таймзону по геолокации (по запросу)\n"
+            "/tz Europe/City — выставить таймзону вручную\n"
+            "/lang — сменить язык"
+        ),
         "help": (
             "Команды:\n"
             "/list — список на сегодня\n"
             "/list DD.MM — список на указанную дату\n"
             "/list time HH:MM — во сколько присылать ежедневный список\n"
             "/reminder on|off — включить/выключить напоминания\n"
-            "/remindertime 15 мин|1 ч — за сколько напоминать\n"
+            "/remindertime <15 мин|1 ч> — за сколько напоминать\n"
             "/tz — обновить таймзону по геолокации (по запросу)\n"
             "/tz Europe/City — выставить таймзону вручную\n"
-            "/lang — сменить язык\n"
-            "\n"
-            "💡 Важно: в задачах используй двоеточие для времени (`16:30`), а точку или слэш для даты "
-            "(`31.08`, `31/08`). Так я точно не перепутаю дату со временем."
+            "/lang — сменить язык\n\n"
+            "Подсказка: время — с `:`, дата — с `.` или `/`."
         ),
         "state_summary": (
             "Текущий часовой пояс: {tz}\n"
@@ -98,10 +103,10 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "reminders_on": "Напоминания: включены.",
         "reminders_off": "Напоминания: выключены.",
         "tz_updated": "Часовой пояс обновлён: {tz}.",
-        "tz_geo_prompt": "Поделись геолокацией, чтобы я выставил твой часовой пояс автоматически.",
+        "tz_geo_prompt": "Поделись геолокацией, чтобы выставить часовой пояс автоматически.",
         "tz_geo_fail": "Не удалось определить часовой пояс.",
         "added_today_nodt": "Добавил на сегодня: {text}",
-        "added_task": "Ок, добавил: {text}\nНа {date} {when}",
+        "added_task": "Ок, добавил: {text}\nНа {date}{when}",
         "today_list": "Задачи на сегодня ({date}):\n{list}",
         "on_list": "Задачи на {date}:\n{list}",
         "empty": "Пока пусто",
@@ -109,11 +114,11 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "summary": "Доброе утро! Вот план на сегодня ({date}):\n{list}",
         "format_list": "Форматы: `/list`, `/list DD.MM`, `/list time HH:MM`",
         "time_invalid": "Время некорректно. Пример: `09:30`.",
+        "dt_invalid_strict": "Дата/время некорректны. Пиши время с `:` (например 14:30) и дату с `.` или `/` (например 31.08).",
         "lead_invalid": "Не понял длительность. Примеры: `15 мин`, `1 ч`, `30 m`, `2 h`, `нет`.",
         "range_invalid": "Значение вне диапазона (0..1440).",
         "tz_invalid": "Не знаю такой зоны. Пример: `/tz Europe/Moscow`.",
         "tip_setup": "Подсказка: /tz → /remindertime → /list time.",
-        "please_yesno": "Ответь, пожалуйста: «да/yes» или «нет/no».",
     },
     "en": {
         "welcome": (
@@ -126,38 +131,47 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "lang_saved": "Done! Language: English.",
         "intro_mechanics": (
             "How I work:\n"
-            "📜 Send tasks as plain text — I parse dates & times in natural language.\n"
-            "📜 If you send no date/time — I'll just add it for today.\n"
-            "📜 Tasks that have a time will trigger reminders in advance — as you configure.\n"
-            "📜 Every morning you'll get the daily list.\n\n"
+            "• Send tasks as plain text — I parse dates & times naturally.\n"
+            "• If there's no date/time — I'll add it for today.\n"
+            "• Tasks with time get advance reminders (configurable).\n"
+            "• Every morning you'll get the daily list.\n\n"
             "Ready?"
         ),
         "ask_tz": (
             "Share your location to auto-set your timezone.\n"
-            "Prefer not to share? Use `/tz Europe/City`, e.g. `/tz Europe/Madrid`."
+            "Or set it manually as `Continent/City`, e.g. `/tz Europe/London`."
         ),
         "ask_reminder_lead": (
             "How long before a task should I remind you?\n"
             "Type e.g. `15 min`, `30 min`, `1 h`. If you don't want reminders — reply `no`."
         ),
         "ask_summary_time": (
-            "When should I send the morning list? Reply with time `HH:MM`, e.g. `09:00`."
+            "When should I send the morning list? Enter time `HH:MM`, e.g. `09:00`."
         ),
         "setup_done_title": "All set! ✅",
-        "setup_done_body": "Here are the commands:",
+        "setup_done_body": (
+            "Heads up: use `:` for time (e.g. 14:30) and `.` or `/` for dates (e.g. 31.08 or 31/08) so I don't get confused.\n\n"
+            "Commands:\n"
+            "/list — today's tasks\n"
+            "/list DD.MM — tasks for a given date\n"
+            "/list time HH:MM — set daily summary time\n"
+            "/reminder on|off — enable/disable reminders\n"
+            "/remindertime <15 min|1 h> — reminder lead time\n"
+            "/tz — update timezone via location (on request)\n"
+            "/tz Europe/City — set timezone manually\n"
+            "/lang — change language"
+        ),
         "help": (
             "Commands:\n"
             "/list — today's tasks\n"
             "/list DD.MM — tasks for a given date\n"
             "/list time HH:MM — set daily summary time\n"
             "/tz — update timezone via location (on request)\n"
-            "/tz Europe/City — set a specific timezone manually\n"
+            "/tz Europe/City — set timezone manually\n"
             "/reminder on|off — enable/disable reminders\n"
-            "/remindertime 15 min|1 h — reminder lead time\n"
-            "/lang — change language\n"
-            "\n"
-            "💡 Tip: when adding tasks, use a colon for time (`16:30`) and a dot or slash for dates "
-            "(`31.08`, `31/08`). This way I won’t confuse dates with times."
+            "/remindertime <15 min|1 h> — reminder lead time\n"
+            "/lang — change language\n\n"
+            "Tip: use `:` for time; use `.` or `/` for dates."
         ),
         "state_summary": (
             "Timezone: {tz}\n"
@@ -172,19 +186,19 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "tz_geo_prompt": "Share your location to set your timezone automatically.",
         "tz_geo_fail": "Couldn't determine timezone.",
         "added_today_nodt": "Added for today: {text}",
-        "added_task": "Done: {text}\nFor {date} {when}",
+        "added_task": "Done: {text}\nFor {date}{when}",
         "today_list": "Today's tasks ({date}):\n{list}",
         "on_list": "Tasks for {date}:\n{list}",
         "empty": "Nothing yet",
         "reminder": "⏰ Reminder: {text}\nAt {time}",
         "summary": "Good morning! Here's your plan for today ({date}):\n{list}",
         "format_list": "Formats: `/list`, `/list DD.MM`, `/list time HH:MM`",
-        "time_invalid": "Invalid time, e.g. `09:30`.",
+        "time_invalid": "Invalid time. Example: `09:30`.",
+        "dt_invalid_strict": "Invalid date/time. Use `:` for time (e.g. 14:30) and `.` or `/` for dates (e.g. 31.08).",
         "lead_invalid": "Couldn't parse duration. Examples: `15 min`, `1 h`, `30 м`, `2 ч`, `no`.",
         "range_invalid": "Value out of range (0..1440).",
-        "tz_invalid": "Unknown zone. Example: `/tz Europe/Madrid`.",
+        "tz_invalid": "Unknown zone. Example: `/tz Europe/London`.",
         "tip_setup": "Tip: /tz → /remindertime → /list time.",
-        "please_yesno": "Please reply `yes` or `no`.",
     },
 }
 
@@ -195,6 +209,7 @@ def T(lang: str, key: str, **kwargs) -> str:
     d = MESSAGES.get(lang, MESSAGES[DEFAULT_LANG])
     s = d.get(key, key)
     return s.format(**kwargs) if kwargs else s
+
 
 # ----------------- Storage -----------------
 
@@ -239,12 +254,14 @@ def init_db():
             cur.execute(alter)
         except sqlite3.OperationalError:
             pass
+
     con.commit()
     con.close()
 
 
 def get_con():
     return sqlite3.connect(DB_PATH)
+
 
 # ----------------- Helpers -----------------
 
@@ -305,55 +322,93 @@ def set_chat_settings(chat_id: int, tzname: Optional[str] = None, hour: Optional
 
 def tz_from_location(lat: float, lon: float) -> Optional[str]:
     try:
-        return TF.timezone_at(lng=lon, lat=lat)
+        tzname = TF.timezone_at(lng=lon, lat=lat)
+        return tzname
     except Exception:
         return None
 
 
 def _guess_all_day_from_span(span_text: str, dt: datetime) -> bool:
-    # время считаем только если явно есть двоеточие
     span = span_text.lower()
-    has_time = ":" in span
+    has_time = any(sep in span for sep in [":", "."]) and any(t.isdigit() for t in span)
     return (dt.hour == 0 and dt.minute == 0) and not has_time
 
 
-def _parse_explicit_ddmm(text: str, chat_tz: str):
+class InvalidDateTime(ValueError):
+    pass
+
+
+def _strict_dt_parse(text: str, chat_tz: str):
     """
-    Явный парсинг форматов: DD.MM, D.M, DD/MM, D/M, с необязательным годом.
-    Возвращает (due_utc, task_text, all_day=1) или None.
+    Строгий парсер dd.mm(/yyyy)|dd/mm(/yyyy) и времени hh:mm.
+    Возвращает (due_utc, task_text, all_day) или:
+    - None, если в тексте нет явных дат/времени;
+    - бросает InvalidDateTime при явной, но неверной дате/времени (например 32.08, 25:99).
     """
-    m = re.search(r"(?P<dd>\d{1,2})[./](?P<mm>\d{1,2})(?:[./](?P<yy>\d{2,4}))?", text)
-    if not m:
-        return None
-    dd = int(m.group("dd"))
-    mm = int(m.group("mm"))
-    yy = m.group("yy")
     tzinfo = pytz.timezone(chat_tz)
     now_local = datetime.now(tzinfo)
-    year = now_local.year if yy is None else (2000 + int(yy) if len(yy) == 2 else int(yy))
+
+    date_re = re.search(r'\b(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?\b', text)
+    time_re = re.search(r'\b(\d{1,2}):(\d{2})\b', text)
+
+    if not date_re and not time_re:
+        return None  # нет явной даты/времени
+
+    # --- дата ---
+    if date_re:
+        dd, mm, yy = date_re.groups()
+        dd = int(dd); mm = int(mm)
+        if not (1 <= dd <= 31 and 1 <= mm <= 12):
+            raise InvalidDateTime("bad date")
+        if yy:
+            yy = int(yy)
+            if yy < 100:
+                yy += 2000 if yy < 70 else 1900
+            year = yy
+        else:
+            year = now_local.year
+    else:
+        # нет даты → сегодня
+        year, mm, dd = now_local.year, now_local.month, now_local.day
+
+    # --- время ---
+    if time_re:
+        hh, mn = int(time_re.group(1)), int(time_re.group(2))
+        if not (0 <= hh <= 23 and 0 <= mn <= 59):
+            raise InvalidDateTime("bad time")
+        all_day = 0
+    else:
+        hh, mn = 23, 59
+        all_day = 1
+
     try:
-        candidate = tzinfo.localize(datetime(year, mm, dd, 23, 59))
+        local_dt = tzinfo.localize(datetime(year, mm, dd, hh, mn))
     except ValueError:
-        return None
-    # предпочитаем будущее: если дата уже прошла — берем следующий год
-    if candidate.date() < now_local.date():
-        try:
-            candidate = candidate.replace(year=candidate.year + 1)
-        except ValueError:
-            pass
-    matched_span = m.group(0)
-    task_text = (text[:m.start()] + text[m.end():]).strip(" -—:,.;")
-    return candidate.astimezone(pytz.utc), task_text or "Без названия", 1
+        raise InvalidDateTime("bad calendar date")
+
+    due_utc = local_dt.astimezone(pytz.utc)
+
+    # вырезаем найденные куски
+    task_text = text
+    if date_re:
+        task_text = task_text.replace(date_re.group(0), "")
+    if time_re:
+        task_text = task_text.replace(time_re.group(0), "")
+    task_text = task_text.strip(" -—:,.;") or ("Без названия" if DEFAULT_LANG == "ru" else "Untitled")
+
+    return due_utc, task_text, all_day
 
 
 def parse_task_input(text: str, chat_tz: str):
-    # 1) сначала пробуем явные DD.MM / DD/MM
-    explicit = _parse_explicit_ddmm(text, chat_tz)
-    if explicit:
-        return explicit
-
+    """
+    1) Пытаемся распарсить dateparser'ом (свободный ввод).
+    2) Если он не сработал — пробуем строгий парсер.
+       - None → вообще нет даты/времени (значит добавляем на сегодня без времени)
+       - InvalidDateTime → сообщаем пользователю, НИЧЕГО НЕ ДОБАВЛЯЕМ
+    """
     tzinfo = pytz.timezone(chat_tz)
     now_local = datetime.now(tzinfo)
+
     settings = {
         "TIMEZONE": chat_tz,
         "RETURN_AS_TIMEZONE_AWARE": True,
@@ -361,27 +416,33 @@ def parse_task_input(text: str, chat_tz: str):
         "DATE_ORDER": "DMY",
         "RELATIVE_BASE": now_local,
     }
-    results = search_dates(text, languages=["ru", "en", "it"], settings=settings)
-    if not results:
-        return None
 
-    matched_span, dt = results[0]
-    if dt.tzinfo is None:
-        dt = tzinfo.localize(dt)
+    try:
+        results = search_dates(text, languages=["ru", "en", "it"], settings=settings)
+    except Exception:
+        results = None
 
-    task_text = text.replace(matched_span, "").strip(" -—:,.;") or "Без названия"
+    if results:
+        matched_span, dt = results[0]
+        if dt.tzinfo is None:
+            dt = tzinfo.localize(dt)
 
-    all_day_flag = 1 if _guess_all_day_from_span(matched_span, dt) else 0
-    if all_day_flag:
-        dt = tzinfo.localize(datetime(dt.year, dt.month, dt.day, 23, 59))
+        task_text = text.replace(matched_span, "").strip(" -—:,.;") or ("Без названия" if DEFAULT_LANG=="ru" else "Untitled")
+        all_day_flag = 1 if _guess_all_day_from_span(matched_span, dt) else 0
+        if all_day_flag:
+            dt = tzinfo.localize(datetime(dt.year, dt.month, dt.day, 23, 59))
 
-    due_utc = dt.astimezone(pytz.utc)
-    if due_utc < datetime.now(pytz.utc) - timedelta(minutes=1):
-        try:
-            due_utc = due_utc.replace(year=due_utc.year + 1)
-        except ValueError:
-            pass
-    return due_utc, task_text, all_day_flag
+        due_utc = dt.astimezone(pytz.utc)
+        if due_utc < datetime.now(pytz.utc) - timedelta(minutes=1):
+            try:
+                due_utc = due_utc.replace(year=due_utc.year + 1)
+            except ValueError:
+                pass
+        return due_utc, task_text, all_day_flag
+
+    # строгий парсер
+    strict = _strict_dt_parse(text, chat_tz)
+    return strict  # может вернуть None или tuple
 
 
 def save_task(chat_id: int, due_utc: datetime, text: str, all_day: int) -> int:
@@ -389,7 +450,13 @@ def save_task(chat_id: int, due_utc: datetime, text: str, all_day: int) -> int:
     cur = con.cursor()
     cur.execute(
         "INSERT INTO tasks (chat_id, text, due_utc, created_utc, done, all_day) VALUES (?, ?, ?, ?, 0, ?)",
-        (chat_id, text, due_utc.isoformat(), datetime.utcnow().isoformat(), all_day),
+        (
+            chat_id,
+            text,
+            due_utc.isoformat(),
+            datetime.utcnow().isoformat(),
+            all_day,
+        ),
     )
     task_id = cur.lastrowid
     con.commit()
@@ -401,6 +468,7 @@ def fetch_tasks_for_date(chat_id: int, day: datetime, chat_tz: str) -> List[Tupl
     tzinfo = pytz.timezone(chat_tz)
     start_local = tzinfo.localize(datetime(day.year, day.month, day.day, 0, 0))
     end_local = start_local + timedelta(days=1)
+
     start_utc = start_local.astimezone(pytz.utc).isoformat()
     end_utc = end_local.astimezone(pytz.utc).isoformat()
 
@@ -426,7 +494,7 @@ def format_tasks(lang: str, tasks: List[Tuple[int, str, datetime, int]]) -> str:
     lines = []
     for _id, text, due_local, all_day in tasks:
         if all_day:
-            lines.append(f"• {text}")  # без [без времени]
+            lines.append(f"• {text}")
         else:
             lines.append(f"• {due_local.strftime('%H:%M')} — {text}")
     return "\n".join(lines)
@@ -446,10 +514,38 @@ def parse_lead_minutes(s: str) -> Optional[int]:
         return n * 60
     return n
 
+
+def is_commandish(text: str) -> Optional[Tuple[str, List[str]]]:
+    """
+    Распознаёт команды без слэша.
+    Возвращает ('list', ['time','09:30']) и т.п. или None.
+    """
+    t = text.strip()
+    m = re.fullmatch(r'(?i)list(?:\s+time\s+(\d{1,2}:\d{2}))?', t)
+    if m:
+        if m.group(1):
+            return ("list_time", [m.group(1)])
+        return ("list", [])
+    if re.fullmatch(r'(?i)help', t):
+        return ("help", [])
+    m = re.fullmatch(r'(?i)remindertime\s+(.+)', t)
+    if m:
+        return ("remindertime", [m.group(1)])
+    m = re.fullmatch(r'(?i)reminder\s+(on|off)', t)
+    if m:
+        return ("reminder", [m.group(1)])
+    m = re.fullmatch(r'(?i)tz\s+(.+)', t)
+    if m:
+        return ("tz", [m.group(1)])
+    if re.fullmatch(r'(?i)lang', t):
+        return ("lang", [])
+    return None
+
+
 # ----------------- Reminders -----------------
 
 async def schedule_task_reminder(context: ContextTypes.DEFAULT_TYPE, chat_id: int, task_id: int, due_utc: datetime):
-    tzname, _, _, lead_min, enabled, _, _ = get_chat_settings(chat_id)
+    tzname, _, _, lead_min, enabled, _, lang = get_chat_settings(chat_id)
     if not enabled or lead_min <= 0:
         return
     con = get_con()
@@ -459,12 +555,15 @@ async def schedule_task_reminder(context: ContextTypes.DEFAULT_TYPE, chat_id: in
     con.close()
     if not row or int(row[0]) == 1:
         return
+
     reminder_utc = due_utc - timedelta(minutes=lead_min)
     if reminder_utc <= datetime.utcnow():
         return
+
     job_name = f"reminder_{chat_id}_{task_id}"
     for j in context.job_queue.get_jobs_by_name(job_name):
         j.schedule_removal()
+
     context.job_queue.run_once(
         when=reminder_utc,
         callback=reminder_job,
@@ -509,6 +608,7 @@ async def reschedule_all_reminders(context: ContextTypes.DEFAULT_TYPE, chat_id: 
         due_utc = datetime.fromisoformat(due_iso).astimezone(pytz.utc)
         await schedule_task_reminder(context, chat_id, task_id, due_utc)
 
+
 # ----------------- Bot Handlers -----------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -545,18 +645,13 @@ async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tasks = fetch_tasks_for_date(chat_id, now_local, tzname)
         await update.message.reply_text(T(lang, "today_list", date=now_local.strftime('%d.%m'), list=format_tasks(lang, tasks)))
         return
-    if len(args) == 2 and "." in args[1] or (len(args) == 2 and "/" in args[1]):
+    if len(args) == 2 and "." in args[1]:
         try:
-            if "/" in args[1]:
-                dd, mm = args[1].split("/")
-            else:
-                dd, mm = args[1].split(".")
+            dd, mm = args[1].split(".")
             day = int(dd); month = int(mm)
             now_local = datetime.now(pytz.timezone(tzname))
             year = now_local.year
             target = datetime(year, month, day)
-            if target.date() < now_local.date():
-                target = target.replace(year=year + 1)
         except Exception:
             await update.message.reply_text(T(lang, "format_list"))
             return
@@ -627,6 +722,7 @@ async def tz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(T(lang, "tz_invalid"))
             await ask_tz_step(update, context)
             return
+
     await ask_tz_step(update, context)
     kb = ReplyKeyboardMarkup(
         [[KeyboardButton(text=("Определить по геолокации" if lang=="ru" else "Detect via geolocation"), request_location=True)]],
@@ -652,6 +748,7 @@ async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await schedule_daily_summary(context, chat_id, reschedule=True)
     await reschedule_all_reminders(context, chat_id)
     await update.message.reply_text(T(lang, "tz_updated", tz=newtz), reply_markup=ReplyKeyboardRemove())
+
     if context.chat_data.get('onboard_stage') == 'ask_tz':
         await ask_reminder_lead_step(update, context)
 
@@ -664,24 +761,6 @@ async def lang_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.chat_data['onboard_stage'] = 'lang_select'
 
 
-# ---------- plain-command helper ----------
-def _maybe_handle_plain_command(text: str) -> Optional[Tuple[str, List[str]]]:
-    """
-    Возвращает ('list', ['DD.MM'...]) если похоже на текстовую команду без слэша.
-    Сейчас поддерживаем только list; остальные просто игнорируем как команды.
-    """
-    parts = text.strip().split()
-    if not parts:
-        return None
-    cmd = parts[0].lower()
-    if cmd == "list":
-        return ("list", parts[1:])
-    # не добавляем в задачи голые аналоги команд
-    if cmd in {"help", "tz", "reminder", "remindertime", "lang"}:
-        return (cmd, parts[1:])
-    return None
-
-
 async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
@@ -691,7 +770,7 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stage = context.chat_data.get('onboard_stage')
     text = update.message.text.strip()
 
-    # --- шаг выбора языка ---
+    # --- онбординг: выбор языка ---
     if stage == "lang_select":
         msg = text.lower()
         if msg in {"русский", "russian"}:
@@ -710,7 +789,7 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(T(lang, "choose_lang_prompt"), reply_markup=kb)
         return
 
-    # --- шаг выбора таймзоны ---
+    # --- онбординг: таймзона ---
     if stage == "ask_tz":
         raw = text.strip()
         if "/" in raw:
@@ -729,7 +808,7 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await ask_tz_step(update, context)
         return
 
-    # --- шаг выбора напоминаний ---
+    # --- онбординг: напоминания ---
     if stage == 'ask_reminder':
         minutes = parse_lead_minutes(text)
         if minutes is None:
@@ -746,7 +825,7 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await ask_summary_time_step(update, context)
         return
 
-    # --- шаг выбора времени ежедневной сводки ---
+    # --- онбординг: время ежедневной сводки ---
     if stage == 'ask_summary_time':
         try:
             hh, mm = map(int, text.split(":"))
@@ -758,55 +837,69 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_chat_settings(chat_id, hour=hh, minute=mm)
         await schedule_daily_summary(context, chat_id, reschedule=True)
         await update.message.reply_text(T(lang, "daily_set", hh=hh, mm=mm, tz=tzname))
-        await update.message.reply_text(f"{T(lang, 'setup_done_title')}\n\n{T(lang, 'setup_done_body')}\n\n{T(lang, 'help')}")
+        await update.message.reply_text(
+            f"{T(lang, 'setup_done_title')}\n\n{T(lang, 'setup_done_body')}"
+        )
         context.chat_data.pop('onboard_stage', None)
         return
 
-    # -------- plain "list" without slash (и аналоги) --------
-    plain = _maybe_handle_plain_command(text)
-    if plain:
-        cmd, args = plain
-        if cmd == "list":
-            # эмулируем /list
-            if not args:
-                now_local = datetime.now(pytz.timezone(tzname))
-                tasks = fetch_tasks_for_date(chat_id, now_local, tzname)
-                await update.message.reply_text(T(lang, "today_list", date=now_local.strftime('%d.%m'), list=format_tasks(lang, tasks)))
-                return
-            fake = "/list " + " ".join(args)
-            update.message.text = fake  # для повторного использования парсера
+    # -------- команды без слэша --------
+    cmd = is_commandish(text)
+    if cmd:
+        name, args = cmd
+        if name == "list":
             await list_cmd(update, context)
             return
-        # help/tz/reminder/remindertime/lang без слэша — просто подскажем использовать /
-        await update.message.reply_text("Use /" + cmd if lang == "en" else "Используй `/" + cmd + "`", parse_mode="Markdown")
-        return
+        if name == "list_time":
+            update.message.text = f"/list time {args[0]}"
+            await list_cmd(update, context)
+            return
+        if name == "help":
+            await help_cmd(update, context)
+            return
+        if name == "remindertime":
+            update.message.text = f"/remindertime {args[0]}"
+            await remindertime_cmd(update, context)
+            return
+        if name == "reminder":
+            update.message.text = f"/reminder {args[0]}"
+            await reminder_toggle_cmd(update, context)
+            return
+        if name == "tz":
+            update.message.text = f"/tz {args[0]}"
+            await tz_cmd(update, context)
+            return
+        if name == "lang":
+            await lang_cmd(update, context)
+            return
 
     # -------- обычный режим: добавление задач --------
-    parsed = parse_task_input(text, tzname)
+    try:
+        parsed = parse_task_input(text, tzname)
+    except InvalidDateTime:
+        await update.message.reply_text(T(lang, "dt_invalid_strict"))
+        return
+
     if parsed:
         due_utc, task_text, all_day = parsed
         task_id = save_task(chat_id, due_utc, task_text, all_day)
         due_local = due_utc.astimezone(pytz.timezone(tzname))
-        when_str = task_text if all_day else f"{due_local.strftime('%H:%M')}"
         if all_day:
-            # all-day: без префиксов
-            await update.message.reply_text(
-                T(lang, "added_task", text=task_text, date=due_local.strftime('%d.%m'), when="")
-            )
+            when_suffix = ""
         else:
-            when_prefix = ("at " if lang=="en" else "в ")
-            await update.message.reply_text(
-                T(lang, "added_task", text=task_text, date=due_local.strftime('%d.%m'), when=when_prefix + due_local.strftime('%H:%M'))
-            )
+            when_suffix = (" at " if lang=="en" else " в ") + due_local.strftime('%H:%M')
+        await update.message.reply_text(
+            T(lang, "added_task", text=task_text, date=due_local.strftime('%d.%m'), when=when_suffix)
+        )
         await schedule_task_reminder(context, chat_id, task_id, due_utc)
     else:
-        # без даты/времени → всегда на сегодня (конец дня)
         tzinfo = pytz.timezone(tzname)
         now_local = datetime.now(tzinfo)
         due_local = tzinfo.localize(datetime(now_local.year, now_local.month, now_local.day, 23, 59))
         save_task(chat_id, due_local.astimezone(pytz.utc), text or ("Без названия" if lang=="ru" else "Untitled"), 1)
         await update.message.reply_text(T(lang, "added_today_nodt", text=text))
         return
+
 
 # ---------- Онбординг шаги (хелперы) ----------
 
@@ -833,6 +926,7 @@ async def ask_summary_time_step(update: Update, context: ContextTypes.DEFAULT_TY
     lang = get_chat_settings(chat_id)[-1]
     await update.message.reply_text(T(lang, "ask_summary_time"))
     context.chat_data['onboard_stage'] = 'ask_summary_time'
+
 
 # ----------------- Scheduler -----------------
 
@@ -863,7 +957,8 @@ async def daily_summary_job(ctx: ContextTypes.DEFAULT_TYPE):
         text=T(lang, "summary", date=now_local.strftime('%d.%m'), list=format_tasks(lang, tasks)),
     )
 
-# ----------------- Dev helper -----------------
+
+# ----------------- Dev helper: parser smoke tests -----------------
 
 def _run_parser_smoke_tests():
     samples = [
@@ -875,18 +970,23 @@ def _run_parser_smoke_tests():
         "15 сентября доклад",
         "сегодня в 18 встреча",
         "купить хлеб",
-        "пожарить бычков 31.08",
-        "пожарить бычков 31/08",
+        "31.08 пожарить бычков",
+        "32.08 что-то неверное",  # должно считаться ошибкой
     ]
     tzname = DEFAULT_TZ
     ok = 0
     for s in samples:
         try:
             res = parse_task_input(s, tzname)
-            ok += 1 if (s == "купить хлеб" and res is None) or (s != "купить хлеб" and res is not None) else 0
+            if s.startswith("32.08"):
+                assert False, "должно быть InvalidDateTime"
+            ok += 1
+        except InvalidDateTime:
+            ok += 1
         except Exception as e:
             print("[TEST FAIL]", s, e)
-    print(f"Parser smoke tests passed: {ok}/{len(samples)}")
+    print(f"Parser tests passed: {ok}/{len(samples)}")
+
 
 # ----------------- Main -----------------
 
