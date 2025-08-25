@@ -785,7 +785,16 @@ def main():
     if not token:
         raise RuntimeError("Set BOT_TOKEN env variable")
 
-    app: Application = ApplicationBuilder().token(token).build()
+    # сбрасываем возможный webhook и висящие апдейты перед стартом polling
+    async def _post_init(app):
+        await app.bot.delete_webhook(drop_pending_updates=True)
+
+    app: Application = (
+        ApplicationBuilder()
+        .token(token)
+        .post_init(_post_init)   # <-- подключаем пост-инициализацию
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
@@ -806,3 +815,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
