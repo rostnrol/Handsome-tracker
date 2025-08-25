@@ -287,12 +287,15 @@ def tz_from_location(lat: float, lon: float) -> Optional[str]:
     except Exception:
         return None
 
-
 def _guess_all_day_from_span(span_text: str, dt: datetime) -> bool:
-    span = span_text.lower()
-    has_time = any(sep in span for sep in [":", "."]) and any(t.isdigit() for t in span)
-    return (dt.hour == 0 and dt.minute == 0) and not has_time
-
+    span = span_text.strip().lower()
+    # если парсер дал 00:00 и похоже на дату (ДД.ММ или ДД/ММ)
+    if (dt.hour == 0 and dt.minute == 0) and (("." in span or "/" in span) and len(span) <= 5):
+        return True
+    # если в куске явно есть время (например "16:00")
+    if ":" in span:
+        return False
+    return (dt.hour == 0 and dt.minute == 0)
 
 def parse_task_input(text: str, chat_tz: str):
     tzinfo = pytz.timezone(chat_tz)
