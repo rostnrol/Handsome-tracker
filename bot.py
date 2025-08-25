@@ -62,7 +62,7 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         ),
         "ask_tz": (
             "Отправь геолокацию — я настрою твой часовой пояс автоматически.\n"
-            "Или введи вручную в формате `Continent/City`, например: `Europe/Moscow`."
+            "Или введи вручную в формате `Continent/City`, например: Europe/Rome."
         ),
         "ask_reminder_lead": (
             "За сколько времени до задачи присылать напоминание?\n"
@@ -108,7 +108,7 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         "time_invalid": "Время некорректно. Пример: `09:30`.",
         "lead_invalid": "Не понял длительность. Примеры: `15 мин`, `1 ч`, `30 m`, `2 h`, `нет`.",
         "range_invalid": "Значение вне диапазона (0..1440).",
-        "tz_invalid": "Не знаю такой зоны. Пример: `Europe/Moscow`.",
+        "tz_invalid": "Не знаю такой зоны. Пример: Europe/Rome.",
         "tip_setup": "Подсказка: /tz → /remindertime → /list time.",
     },
     "en": {
