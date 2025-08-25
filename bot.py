@@ -544,14 +544,25 @@ def parse_lead_minutes(s: str) -> Tuple[Optional[int], str]:
 def is_commandish(text: str) -> Optional[Tuple[str, List[str]]]:
     """
     Распознаёт команды без слэша.
-    Возвращает ('list', ['time','09:30']) и т.п. или None.
+    Возвращает ('list', []), ('list_time', ['09:30']), ('list_date', ['31.08']) и т.п. или None.
     """
     t = text.strip()
-    m = re.fullmatch(r'(?i)list(?:\s+time\s+(\d{1,2}:\d{2}))?', t)
+
+    # list time HH:MM
+    m = re.fullmatch(r'(?i)list\s+time\s+(\d{1,2}:\d{2})', t)
     if m:
-        if m.group(1):
-            return ("list_time", [m.group(1)])
+        return ("list_time", [m.group(1)])
+
+    # list DD.MM или DD/MM
+    m = re.fullmatch(r'(?i)list\s+(\d{1,2}[./]\d{1,2})', t)
+    if m:
+        return ("list_date", [m.group(1)])
+
+    # просто list
+    if re.fullmatch(r'(?i)list', t):
         return ("list", [])
+
+    # остальные "без слэша"
     if re.fullmatch(r'(?i)help', t):
         return ("help", [])
     m = re.fullmatch(r'(?i)remindertime\s+(.+)', t)
@@ -565,8 +576,8 @@ def is_commandish(text: str) -> Optional[Tuple[str, List[str]]]:
         return ("tz", [m.group(1)])
     if re.fullmatch(r'(?i)lang', t):
         return ("lang", [])
-    return None
 
+    return None
 
 # ----------------- Reminders -----------------
 
@@ -754,6 +765,7 @@ async def tz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     tzname, hour, minute, lead, en, pref, lang = get_chat_settings(chat_id)
     args = update.message.text.split(maxsplit=1)
+
     if len(args) == 2:
         newtz = args[1].strip()
         try:
@@ -770,15 +782,10 @@ async def tz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await ask_tz_step(update, context)
             return
 
+    # без аргументов — просто показать шаг онбординга с кнопкой геолокации
     await ask_tz_step(update, context)
-    kb = ReplyKeyboardMarkup(
-        [[KeyboardButton(text=("Определить по геолокации" if lang=="ru" else "Detect via geolocation"), request_location=True)]],
-        resize_keyboard=True, one_time_keyboard=True,
-    )
-    await update.message.reply_text(T(lang, "tz_geo_prompt"), reply_markup=kb)
     if context.chat_data.get('onboard_stage') in (None, 'intro_confirm'):
         context.chat_data['onboard_stage'] = 'ask_tz'
-
 
 async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.location:
@@ -817,7 +824,7 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stage = context.chat_data.get('onboard_stage')
     text = update.message.text.strip()
 
-    # --- онбординг: выбор языка ---
+      # --- онбординг: выбор языка ---
     if stage == "lang_select":
         msg = text.lower()
         if msg in {"русский", "russian"}:
@@ -851,12 +858,13 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(T(lang, "tz_invalid"))
                 await ask_tz_step(update, context)
                 return
+        # невалидный ввод → повторить шаг
         await update.message.reply_text(T(lang, "tz_invalid"))
         await ask_tz_step(update, context)
         return
 
     # --- онбординг: напоминания ---
-        if stage == 'ask_reminder':
+    if stage == 'ask_reminder':
         minutes, status = parse_lead_minutes(text)
 
         if status == "disable":
@@ -887,9 +895,7 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_chat_settings(chat_id, hour=hh, minute=mm)
         await schedule_daily_summary(context, chat_id, reschedule=True)
         await update.message.reply_text(T(lang, "daily_set", hh=hh, mm=mm, tz=tzname))
-        await update.message.reply_text(
-            f"{T(lang, 'setup_done_title')}\n\n{T(lang, 'setup_done_body')}"
-        )
+        await update.message.reply_text(f"{T(lang, 'setup_done_title')}\n\n{T(lang, 'setup_done_body')}")
         context.chat_data.pop('onboard_stage', None)
         return
 
@@ -898,30 +904,21 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if cmd:
         name, args = cmd
         if name == "list":
-            await list_cmd(update, context)
-            return
+            await list_cmd(update, context); return
         if name == "list_time":
-            update.message.text = f"/list time {args[0]}"
-            await list_cmd(update, context)
-            return
+            update.message.text = f"/list time {args[0]}"; await list_cmd(update, context); return
+        if name == "list_date":
+            update.message.text = f"/list {args[0]}"; await list_cmd(update, context); return
         if name == "help":
-            await help_cmd(update, context)
-            return
+            await help_cmd(update, context); return
         if name == "remindertime":
-            update.message.text = f"/remindertime {args[0]}"
-            await remindertime_cmd(update, context)
-            return
+            update.message.text = f"/remindertime {args[0]}"; await remindertime_cmd(update, context); return
         if name == "reminder":
-            update.message.text = f"/reminder {args[0]}"
-            await reminder_toggle_cmd(update, context)
-            return
+            update.message.text = f"/reminder {args[0]}"; await reminder_toggle_cmd(update, context); return
         if name == "tz":
-            update.message.text = f"/tz {args[0]}"
-            await tz_cmd(update, context)
-            return
+            update.message.text = f"/tz {args[0]}"; await tz_cmd(update, context); return
         if name == "lang":
-            await lang_cmd(update, context)
-            return
+            await lang_cmd(update, context); return
 
     # -------- обычный режим: добавление задач --------
     try:
