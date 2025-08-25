@@ -80,6 +80,7 @@ MESSAGES: Dict[str, Dict[str, str]] = {
             "/tz Europe/Rome — выставить таймзону вручную\n"
             "/lang — сменить язык"
             "\n"
+            "\n"
             "💡 Важно: в задачах используй двоеточие для времени (`16:30`), а точку или слэш для даты (`31.08`, `31/08`). Так я точно не перепутаю дату со временем."
         ),
         "help": (
@@ -160,6 +161,7 @@ MESSAGES: Dict[str, Dict[str, str]] = {
             "/tz — update timezone via location (on request)\n"
             "/tz Europe/City — set timezone manually\n"
             "/lang — change language"
+            "\n"
             "\n"
             "💡 Heads up: use `:` for time (e.g. 14:30) and `.` or `/` for dates (e.g. 31.08 or 31/08) so I don't get confused."
         ),
