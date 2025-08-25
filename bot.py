@@ -675,18 +675,16 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
 
     # --- шаг выбора языка ---
-    if context.chat_data.get('lang_select'):
+    if stage == "lang_select":
         msg = text.lower()
         if msg in {"русский", "russian"}:
             set_chat_settings(chat_id, lang="ru")
-            context.chat_data.pop('lang_select', None)
             context.chat_data['onboard_stage'] = "ask_tz"
             await update.message.reply_text(MESSAGES['ru']["lang_saved"], reply_markup=ReplyKeyboardRemove())
             await ask_tz_step(update, context)
             return
         if msg in {"english", "английский"}:
             set_chat_settings(chat_id, lang="en")
-            context.chat_data.pop('lang_select', None)
             context.chat_data['onboard_stage'] = "ask_tz"
             await update.message.reply_text(MESSAGES['en']["lang_saved"], reply_markup=ReplyKeyboardRemove())
             await ask_tz_step(update, context)
@@ -699,20 +697,18 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # --- шаг выбора таймзоны ---
     if stage == "ask_tz":
         raw = text.strip()
-        # формат Region/City
         if "/" in raw:
             try:
-                pytz.timezone(raw)  # проверка валидности
+                pytz.timezone(raw)
                 set_chat_settings(chat_id, tzname=raw)
                 context.chat_data['onboard_stage'] = "ask_reminder"
                 await update.message.reply_text(T(lang, "tz_updated", tz=raw), reply_markup=ReplyKeyboardRemove())
-                await ask_reminder_step(update, context)
+                await ask_reminder_lead_step(update, context)
                 return
             except Exception:
                 await update.message.reply_text(T(lang, "tz_invalid"))
                 await ask_tz_step(update, context)
                 return
-        # если невалидный ввод
         await update.message.reply_text(T(lang, "tz_invalid"))
         await ask_tz_step(update, context)
         return
