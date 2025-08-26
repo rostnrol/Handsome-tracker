@@ -638,7 +638,7 @@ def parse_lead_minutes(s: str) -> Tuple[Optional[int], str]:
         return None, "invalid"
 
     n = int(m.group(1))
-    unit = m.group(2)
+    unit = m.group(2).rstrip('.')
 
     hours = {"ч", "час", "часа", "часов", "h", "hr", "hrs", "hour", "hours"}
     mins  = {"м", "мин", "минута", "минуты", "минут", "m", "min", "mins", "minute", "minutes", ""}

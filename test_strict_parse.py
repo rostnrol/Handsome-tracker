@@ -2,7 +2,7 @@ import unittest
 from datetime import datetime, timedelta
 import pytz
 
-from bot import parse_task_input
+from bot import parse_task_input, parse_lead_minutes
 
 class TestStrictDateParse(unittest.TestCase):
     def test_auto_bump_year_for_past_dates(self):
@@ -18,6 +18,12 @@ class TestStrictDateParse(unittest.TestCase):
         due_utc, _, _ = parse_task_input(past_time, 'UTC')
         expected = (past + timedelta(days=1)).replace(second=0, microsecond=0)
         self.assertEqual(due_utc, expected)
+
+    def test_parse_lead_minutes_accepts_dotted_units(self):
+        minutes, status = parse_lead_minutes("15 мин.")
+        self.assertEqual((minutes, status), (15, "ok"))
+        minutes, status = parse_lead_minutes("1 ч.")
+        self.assertEqual((minutes, status), (60, "ok"))
 
 if __name__ == '__main__':
     unittest.main()
