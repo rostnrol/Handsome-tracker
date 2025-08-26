@@ -1392,7 +1392,8 @@ def main():
     except Conflict as e:
         # Silently exit if another poller is already running for this bot token
         print("[polling] Exiting due to Telegram Conflict (another getUpdates request is active):", str(e))
-        return
+        import sys
+        sys.exit(0)
 
 
 if __name__ == "__main__":
