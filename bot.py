@@ -1422,7 +1422,7 @@ def main():
     app.add_handler(MessageHandler(filters.LOCATION, location_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, any_message))
 
-while True:
+    while True:
         try:
             app.run_polling(close_loop=False)
             break
