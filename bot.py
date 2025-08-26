@@ -888,18 +888,29 @@ async def tz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             set_chat_settings(chat_id, tzname=newtz)
             await schedule_daily_summary(context, chat_id, reschedule=True)
             await reschedule_all_reminders(context, chat_id)
-            await update.message.reply_text(T(lang, "tz_updated", tz=newtz))
+            awaiting = context.chat_data.pop('awaiting_tz', None)
+            if awaiting:
+                reply_markup = build_settings_menu(lang) if context.chat_data.get('in_settings') else build_main_menu(lang)
+            else:
+                reply_markup = ReplyKeyboardRemove()
+            await update.message.reply_text(T(lang, "tz_updated", tz=newtz), reply_markup=reply_markup)
             if context.chat_data.get('onboard_stage') == 'ask_tz':
                 await ask_reminder_lead_step(update, context)
             return
         except Exception:
             await update.message.reply_text(T(lang, "tz_invalid"))
             await ask_tz_step(update, context)
+            if not is_onboarded(chat_id):
+                context.chat_data['onboard_stage'] = 'ask_tz'
+            else:
+                context.chat_data['awaiting_tz'] = True
             return
 
     await ask_tz_step(update, context)
-    if context.chat_data.get('onboard_stage') in (None, 'intro_confirm'):
+    if not is_onboarded(chat_id):
         context.chat_data['onboard_stage'] = 'ask_tz'
+    else:
+        context.chat_data['awaiting_tz'] = True
 
 async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.location:
@@ -912,14 +923,24 @@ async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not newtz:
         await update.message.reply_text(T(lang, "tz_geo_fail"), reply_markup=ReplyKeyboardRemove())
         await ask_tz_step(update, context)
+        if not is_onboarded(chat_id):
+            context.chat_data['onboard_stage'] = 'ask_tz'
+        else:
+            context.chat_data['awaiting_tz'] = True
         return
     set_chat_settings(chat_id, tzname=newtz)
     await schedule_daily_summary(context, chat_id, reschedule=True)
     await reschedule_all_reminders(context, chat_id)
-    await update.message.reply_text(T(lang, "tz_updated", tz=newtz), reply_markup=ReplyKeyboardRemove())
-
     if context.chat_data.get('onboard_stage') == 'ask_tz':
+        await update.message.reply_text(T(lang, "tz_updated", tz=newtz), reply_markup=ReplyKeyboardRemove())
         await ask_reminder_lead_step(update, context)
+    else:
+        awaiting = context.chat_data.pop('awaiting_tz', None)
+        if awaiting:
+            markup = build_settings_menu(lang) if context.chat_data.get('in_settings') else build_main_menu(lang)
+            await update.message.reply_text(T(lang, "tz_updated", tz=newtz), reply_markup=markup)
+        else:
+            await update.message.reply_text(T(lang, "tz_updated", tz=newtz), reply_markup=ReplyKeyboardRemove())
 
 
 async def lang_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -927,7 +948,7 @@ async def lang_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_chat_settings(chat_id)[-1]
     kb = ReplyKeyboardMarkup(LANG_BTNS, resize_keyboard=True, one_time_keyboard=True)
     await update.message.reply_text(T(lang, "choose_lang_prompt"), reply_markup=kb)
-    context.chat_data['onboard_stage'] = 'lang_select'
+    context.chat_data['awaiting_lang'] = True
 
 
 async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -947,12 +968,63 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.chat_data['onboard_stage'] = 'lang_select'
         return
 
+    if context.chat_data.get('awaiting_lang'):
+        back_btn = "⬅️ Назад" if lang == "ru" else "⬅️ Back"
+        msg = text.lower()
+        if text == back_btn:
+            context.chat_data.pop('awaiting_lang', None)
+            if in_settings:
+                await update.message.reply_text("Настройки:" if lang=="ru" else "Settings:", reply_markup=build_settings_menu(lang))
+            else:
+                await update.message.reply_text("Главное меню:" if lang=="ru" else "Main menu:", reply_markup=build_main_menu(lang))
+            return
+        if msg in {"русский", "russian"}:
+            set_chat_settings(chat_id, lang="ru")
+            await update.message.reply_text(MESSAGES['ru']["lang_saved"], reply_markup=build_settings_menu("ru") if in_settings else build_main_menu("ru"))
+            context.chat_data.pop('awaiting_lang', None)
+            return
+        if msg in {"english", "английский"}:
+            set_chat_settings(chat_id, lang="en")
+            await update.message.reply_text(MESSAGES['en']["lang_saved"], reply_markup=build_settings_menu("en") if in_settings else build_main_menu("en"))
+            context.chat_data.pop('awaiting_lang', None)
+            return
+        kb = ReplyKeyboardMarkup(LANG_BTNS, resize_keyboard=True, one_time_keyboard=True)
+        await update.message.reply_text(T(lang, "choose_lang_prompt"), reply_markup=kb)
+        return
+
+    if context.chat_data.get('awaiting_tz'):
+        back_btn = "⬅️ Назад" if lang == "ru" else "⬅️ Back"
+        if text == back_btn:
+            context.chat_data.pop('awaiting_tz', None)
+            if in_settings:
+                await update.message.reply_text("Настройки:" if lang=="ru" else "Settings:", reply_markup=build_settings_menu(lang))
+            else:
+                await update.message.reply_text("Главное меню:" if lang=="ru" else "Main menu:", reply_markup=build_main_menu(lang))
+            return
+        raw = text.strip()
+        if "/" in raw:
+            try:
+                pytz.timezone(raw)
+                set_chat_settings(chat_id, tzname=raw)
+                await schedule_daily_summary(context, chat_id, reschedule=True)
+                await reschedule_all_reminders(context, chat_id)
+                reply_markup = build_settings_menu(lang) if in_settings else build_main_menu(lang)
+                await update.message.reply_text(T(lang, "tz_updated", tz=raw), reply_markup=reply_markup)
+                context.chat_data.pop('awaiting_tz', None)
+            except Exception:
+                await update.message.reply_text(T(lang, "tz_invalid"))
+            return
+        await update.message.reply_text(T(lang, "tz_invalid"))
+        return
+
     # ------------ Главное меню ------------
     if not in_settings:
         if text in {"Сегодня", "Today"}:
             context.chat_data.pop('awaiting_list_date', None)
             context.chat_data.pop('awaiting_summary_time', None)
             context.chat_data.pop('awaiting_lead', None)
+            context.chat_data.pop('awaiting_tz', None)
+            context.chat_data.pop('awaiting_lang', None)
             now_local = datetime.now(pytz.timezone(tzname))
             tasks = fetch_tasks_for_date(chat_id, now_local, tzname)
             await update.message.reply_text(T(lang, "today_list", date=now_local.strftime('%d.%m'), list=format_tasks(lang, tasks)), reply_markup=build_main_menu(lang))
@@ -962,6 +1034,8 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.chat_data.pop('awaiting_summary_time', None)
             context.chat_data.pop('awaiting_lead', None)
             context.chat_data.pop('awaiting_list_date', None)
+            context.chat_data.pop('awaiting_tz', None)
+            context.chat_data.pop('awaiting_lang', None)
             await update.message.reply_text("Введите дату в формате DD.MM" if lang=="ru" else "Enter date as DD.MM")
             context.chat_data['awaiting_list_date'] = True
             return
@@ -985,6 +1059,8 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.chat_data.pop('awaiting_list_date', None)
             context.chat_data.pop('awaiting_summary_time', None)
             context.chat_data.pop('awaiting_lead', None)
+            context.chat_data.pop('awaiting_tz', None)
+            context.chat_data.pop('awaiting_lang', None)
             context.chat_data['in_settings'] = True
             await update.message.reply_text("Настройки:" if lang=="ru" else "Settings:", reply_markup=build_settings_menu(lang))
             return
@@ -999,6 +1075,8 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.chat_data.pop('awaiting_list_date', None)
             context.chat_data.pop('awaiting_summary_time', None)
             context.chat_data.pop('awaiting_lead', None)
+            context.chat_data.pop('awaiting_tz', None)
+            context.chat_data.pop('awaiting_lang', None)
             await update.message.reply_text("Главное меню:" if lang=="ru" else "Main menu:", reply_markup=build_main_menu(lang))
             return
 
@@ -1006,6 +1084,8 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.chat_data.pop('awaiting_list_date', None)
             context.chat_data.pop('awaiting_lead', None)
             context.chat_data.pop('awaiting_summary_time', None)
+            context.chat_data.pop('awaiting_tz', None)
+            context.chat_data.pop('awaiting_lang', None)
             await update.message.reply_text("Во сколько присылать? HH:MM" if lang=="ru" else "What time? HH:MM")
             context.chat_data['awaiting_summary_time'] = True
             return
@@ -1014,6 +1094,8 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.chat_data.pop('awaiting_list_date', None)
             context.chat_data.pop('awaiting_summary_time', None)
             context.chat_data.pop('awaiting_lead', None)
+            context.chat_data.pop('awaiting_tz', None)
+            context.chat_data.pop('awaiting_lang', None)
             enable = 0 if enabled else 1
             set_chat_settings(chat_id, reminders_enabled=enable)
             await reschedule_all_reminders(context, chat_id)
@@ -1027,6 +1109,8 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.chat_data.pop('awaiting_list_date', None)
             context.chat_data.pop('awaiting_summary_time', None)
             context.chat_data.pop('awaiting_lead', None)
+            context.chat_data.pop('awaiting_tz', None)
+            context.chat_data.pop('awaiting_lang', None)
             await update.message.reply_text(
                 "За сколько минут напоминать? Например: 15 мин" if lang == "ru" else "How many minutes before? e.g., 15 min"
             )
@@ -1037,13 +1121,19 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.chat_data.pop('awaiting_list_date', None)
             context.chat_data.pop('awaiting_summary_time', None)
             context.chat_data.pop('awaiting_lead', None)
+            context.chat_data.pop('awaiting_lang', None)
             await ask_tz_step(update, context)
+            if not is_onboarded(chat_id):
+                context.chat_data['onboard_stage'] = 'ask_tz'
+            else:
+                context.chat_data['awaiting_tz'] = True
             return
 
         if text in {"Язык", "Language"}:
             context.chat_data.pop('awaiting_list_date', None)
             context.chat_data.pop('awaiting_summary_time', None)
             context.chat_data.pop('awaiting_lead', None)
+            context.chat_data.pop('awaiting_tz', None)
             await lang_cmd(update, context)
             return
 
@@ -1280,7 +1370,7 @@ async def ask_tz_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(T(lang, "tz_geo_prompt"), reply_markup=kb)
     await update.message.reply_text(T(lang, "ask_tz"))
-    context.chat_data['onboard_stage'] = 'ask_tz'
+    # stage management is handled by callers
 
 
 async def ask_reminder_lead_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
