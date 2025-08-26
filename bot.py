@@ -477,7 +477,7 @@ def _strict_dt_parse(text: str, chat_tz: str):
 
     due_utc = local_dt.astimezone(pytz.utc)
 
-     if due_utc < datetime.now(pytz.utc) - timedelta(minutes=1):
+    if due_utc < datetime.now(pytz.utc) - timedelta(minutes=1):
         if not date_re and time_re:
             due_utc += timedelta(days=1)
         else:
