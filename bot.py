@@ -7,7 +7,7 @@ Telegram Task Tracker Bot
 - Автоопределение таймзоны по геолокации (timezonefinder)
 - Персистентный флаг завершения онбординга (исключает зацикливание)
 - Главное меню: [Сегодня] [Список на дату] [Настройки]
-- В Настройках: [Время сводки] [Напоминания] [Время напоминания] [Таймзона] [Язык]
+- Подменю Настройки: [Время сводки] [Напоминания] [Время напоминания] [Таймзона] [Язык] [Назад]
 """
 
 import os
@@ -30,9 +30,9 @@ from telegram.ext import (
 )
 from telegram.error import Conflict
 
-# ---- NEW: timezonefinder (pure Python) ----
+# ---- timezonefinder (pure Python) ----
 try:
-    from timezonefinder import TimezoneFinder  # pure-Python
+    from timezonefinder import TimezoneFinder
 except Exception:
     TimezoneFinder = None
 
@@ -55,7 +55,7 @@ MESSAGES: Dict[str, Dict[str, str]] = {
     "ru": {
         "welcome": (
             "Привет! Возможно я самый простой таск-трекер, которым ты когда-либо пользовался.\n"
-            "Выбери язык ниже — и начнём.\n\n"
+            "Выбери язык ниже и начнём.\n\n"
             "Hi! I might be the simplest task tracker you've ever used.\n"
             "Pick a language below and let's start."
         ),
@@ -102,7 +102,7 @@ MESSAGES: Dict[str, Dict[str, str]] = {
             "В Настройках:\n"
             "• Время сводки\n"
             "• Напоминания (on/off)\n"
-            "• Время напоминания (лид)\n"
+            "• Время напоминания\n"
             "• Таймзона\n"
             "• Язык\n\n"
             "Подсказка: время — с : , дата — с . или /"
@@ -139,7 +139,7 @@ MESSAGES: Dict[str, Dict[str, str]] = {
             "Hi! I might be the simplest task tracker you've ever used.\n"
             "Pick a language below and let's start.\n\n"
             "Привет! Возможно я самый простой таск-трекер, которым ты когда-либо пользовался.\n"
-            "Выбери язык ниже — и начнём."
+            "Выбери язык ниже и начнём."
         ),
         "choose_lang_prompt": "👉 Choose your language:",
         "lang_saved": "Done! Language: English.",
@@ -184,7 +184,7 @@ MESSAGES: Dict[str, Dict[str, str]] = {
             "Settings:\n"
             "• Summary time\n"
             "• Reminders (on/off)\n"
-            "• Reminder time (lead)\n"
+            "• Reminder time\n"
             "• Timezone\n"
             "• Language\n\n"
             "Tip: use : for time; use . or / for dates."
@@ -220,7 +220,7 @@ MESSAGES: Dict[str, Dict[str, str]] = {
 
 LANG_BTNS = [["Русский", "English"]]
 
-# ---- NEW: Menus ----
+# ---- Меню ----
 MAIN_MENU = {
     "ru": [["Сегодня"], ["Список на дату"], ["Настройки"]],
     "en": [["Today"], ["List by date"], ["Settings"]],
@@ -273,6 +273,15 @@ def init_db():
             prefer_no_dt_today INTEGER NOT NULL DEFAULT 1,
             lang TEXT NOT NULL DEFAULT 'ru',
             onboard_done INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_lock (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            holder TEXT,
+            acquired_utc TEXT
         )
         """
     )
@@ -363,16 +372,17 @@ def is_onboarded(chat_id: int) -> bool:
     return bool(row and int(row[0]) == 1)
 
 def set_onboarded(chat_id: int, done: bool = True):
-    tzname, hour, minute, lead, enabled, prefer, lang = get_chat_settings(chat_id)
+    tz, hour, minute, lead, enabled, pref, lang = get_chat_settings(chat_id)
     con = get_con()
     cur = con.cursor()
     cur.execute(
         """
-        INSERT INTO settings (chat_id, tz, daily_hour, daily_minute, remind_lead_min, reminders_enabled, prefer_no_dt_today, lang, onboard_done)
+        INSERT INTO settings (chat_id, tz, daily_hour, daily_minute, remind_lead_min,
+                              reminders_enabled, prefer_no_dt_today, lang, onboard_done)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(chat_id) DO UPDATE SET onboard_done=excluded.onboard_done
         """,
-        (chat_id, tzname, hour, minute, lead, enabled, prefer, lang, 1 if done else 0),
+        (chat_id, tz, hour, minute, lead, enabled, pref, lang, 1 if done else 0),
     )
     con.commit()
     con.close()
@@ -737,21 +747,23 @@ async def reschedule_all_reminders(context: ContextTypes.DEFAULT_TYPE, chat_id: 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     init_db()
-    tzname, hour, minute, lead_min, enabled, _, lang = get_chat_settings(chat_id)
-    set_chat_settings(chat_id, tzname, hour, minute, lead_min, enabled, 1, lang)
+
+    # гарантируем запись в settings с дефолтами
+    tzname, hour, minute, lead_min, enabled, pref, lang = get_chat_settings(chat_id)
+    set_chat_settings(chat_id, tzname, hour, minute, lead_min, enabled, pref, lang)
 
     await schedule_daily_summary(context, chat_id)
     await reschedule_all_reminders(context, chat_id)
 
+    context.chat_data['in_settings'] = False
+
     if is_onboarded(chat_id):
-        # Покажем подсказку и главное меню
         await help_cmd(update, context)
         return
 
     kb = ReplyKeyboardMarkup(LANG_BTNS, resize_keyboard=True, one_time_keyboard=True)
     await update.message.reply_text(T(lang, "welcome"), reply_markup=kb)
     context.chat_data['onboard_stage'] = 'lang_select'
-    context.chat_data['in_settings'] = False
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -889,7 +901,7 @@ async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     newtz = tz_from_location(lat, lon)
     if not newtz:
         await update.message.reply_text(T(lang, "tz_geo_fail"), reply_markup=ReplyKeyboardRemove())
-        await ask_tz_step(update, context)  # повторно предложим ввод/гео
+        await ask_tz_step(update, context)
         return
     set_chat_settings(chat_id, tzname=newtz)
     await schedule_daily_summary(context, chat_id, reschedule=True)
@@ -918,7 +930,7 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     in_settings = context.chat_data.get('in_settings', False)
 
-    # Не запускать авто-онбординг, если уже пройден
+    # Если онбординг не пройден и /start не вызывался
     if stage is None and not is_onboarded(chat_id) and (text.lower() not in {"/start", "start"}):
         kb = ReplyKeyboardMarkup(LANG_BTNS, resize_keyboard=True, one_time_keyboard=True)
         await update.message.reply_text(T(lang, "welcome"), reply_markup=kb)
@@ -928,7 +940,6 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ------------ Главное меню ------------
     if not in_settings:
         if text in {"Сегодня", "Today"}:
-            # Reset awaiting flags
             context.chat_data.pop('awaiting_list_date', None)
             context.chat_data.pop('awaiting_summary_time', None)
             context.chat_data.pop('awaiting_lead', None)
@@ -961,7 +972,6 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
         if text in {"Настройки", "Settings"}:
-            # Сброс флагов ожидания и вход в под-меню
             context.chat_data.pop('awaiting_list_date', None)
             context.chat_data.pop('awaiting_summary_time', None)
             context.chat_data.pop('awaiting_lead', None)
@@ -973,13 +983,13 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if in_settings:
         back_btn = "⬅️ Назад" if lang == "ru" else "⬅️ Back"
         lead_btn = "Время напоминания" if lang == "ru" else "Reminder time"
+
         if text == back_btn:
             context.chat_data['in_settings'] = False
-            # Сброс ожиданий на выход
             context.chat_data.pop('awaiting_list_date', None)
             context.chat_data.pop('awaiting_summary_time', None)
             context.chat_data.pop('awaiting_lead', None)
-            await update.message.reply_text("Окей" if lang=="ru" else "OK", reply_markup=build_main_menu(lang))
+            await update.message.reply_text("Главное меню:" if lang=="ru" else "Main menu:", reply_markup=build_main_menu(lang))
             return
 
         if text in {"Время сводки", "Summary time"}:
