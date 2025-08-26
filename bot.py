@@ -23,6 +23,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+from telegram.error import Conflict
 
 # ----------------- Config -----------------
 
@@ -1386,7 +1387,12 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, any_message))
 
     # Always run polling in worker mode
-    app.run_polling(close_loop=False)
+    try:
+        app.run_polling(close_loop=False)
+    except Conflict as e:
+        # Silently exit if another poller is already running for this bot token
+        print("[polling] Exiting due to Telegram Conflict (another getUpdates request is active):", str(e))
+        return
 
 
 if __name__ == "__main__":
