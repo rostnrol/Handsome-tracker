@@ -1321,8 +1321,13 @@ def main():
     if not token:
         raise RuntimeError("Set BOT_TOKEN env variable")
 
+    # Determine run mode: webhook (Render) vs polling (local). Use webhook if WEBHOOK_URL is provided.
+    use_webhook = bool(os.getenv("WEBHOOK_URL"))
+
     async def _post_init(app):
-        await app.bot.delete_webhook(drop_pending_updates=True)
+        if not use_webhook:
+            # In polling mode ensure webhook is removed to avoid conflicts
+            await app.bot.delete_webhook(drop_pending_updates=True)
 
     app: Application = (
         ApplicationBuilder()
@@ -1343,7 +1348,22 @@ def main():
     app.add_handler(MessageHandler(filters.LOCATION, location_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, any_message))
 
-    app.run_polling(close_loop=False)
+    if use_webhook:
+        # Webhook mode for Render: requires WEBHOOK_URL and PORT env vars
+        import secrets
+        base_url = os.getenv("WEBHOOK_URL").rstrip("/")
+        port = int(os.getenv("PORT", "10000"))
+        path = os.getenv("WEBHOOK_PATH") or ("/" + secrets.token_hex(16))
+        secret = os.getenv("WEBHOOK_SECRET")
+        full_url = base_url + path
+        # Set webhook with drop_pending_updates to avoid backlog conflicts
+        async def _set_hook():
+            await app.bot.set_webhook(url=full_url, secret_token=secret, drop_pending_updates=True)
+        # PTB run_webhook executes sync; use create_task via app to ensure hook set
+        app.create_task(_set_hook())
+        app.run_webhook(listen="0.0.0.0", port=port, url_path=path.lstrip("/"))
+    else:
+        app.run_polling(close_loop=False)
 
 
 if __name__ == "__main__":
