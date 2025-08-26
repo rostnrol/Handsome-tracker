@@ -478,10 +478,13 @@ def _strict_dt_parse(text: str, chat_tz: str):
     due_utc = local_dt.astimezone(pytz.utc)
 
      if due_utc < datetime.now(pytz.utc) - timedelta(minutes=1):
-        try:
-            due_utc = due_utc.replace(year=due_utc.year + 1)
-        except ValueError:
-            pass
+        if not date_re and time_re:
+            due_utc += timedelta(days=1)
+        else:
+            try:
+                due_utc = due_utc.replace(year=due_utc.year + 1)
+            except ValueError:
+                pass
   
     task_text = text
     if date_re:
@@ -1419,7 +1422,7 @@ def main():
     app.add_handler(MessageHandler(filters.LOCATION, location_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, any_message))
 
-  while True:
+while True:
         try:
             app.run_polling(close_loop=False)
             break
