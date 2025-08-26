@@ -7,7 +7,7 @@ Telegram Task Tracker Bot
 - Автоопределение таймзоны по геолокации (timezonefinder)
 - Персистентный флаг завершения онбординга (исключает зацикливание)
 - Главное меню: [Сегодня] [Список на дату] [Настройки]
-- Подменю Настройки: [Время сводки] [Напоминания] [Время напоминания] [Таймзона] [Язык] [Назад]
+- Подменю Настройки: [Время списка] [Напоминания] [Время напоминания] [Таймзона] [Язык] [Назад]
 """
 
 import os
@@ -79,7 +79,7 @@ MESSAGES: Dict[str, Dict[str, str]] = {
             "Напиши, например: 15 мин, 30 мин, 1 ч. Если не нужны — ответь «нет»."
         ),
         "ask_summary_time": (
-            "Во сколько присылать утренний список дел? Введи время HH:MM, например 09:00."
+            "Во сколько присылать утренний список дел? Введи время ЧЧ:MM, например 09:00."
         ),
         "setup_done_title": "Готово! Всё настроено ✅",
         "setup_done_body": (
@@ -88,7 +88,7 @@ MESSAGES: Dict[str, Dict[str, str]] = {
             "• Список на дату\n"
             "• Настройки\n\n"
             "В Настройках:\n"
-            "• Время сводки — во сколько присылать ежедневный список\n"
+            "• Время списка — во сколько присылать ежедневный список\n"
             "• Напоминания — включить/выключить\n"
             "• Время напоминания — за сколько минут напоминать\n"
             "• Таймзона — обновить часовой пояс\n"
@@ -101,7 +101,7 @@ MESSAGES: Dict[str, Dict[str, str]] = {
             "• Список на дату — задачи на выбранную дату\n"
             "• Настройки — открыть параметры\n\n"
             "В Настройках:\n"
-            "• Время сводки\n"
+            "• Время списка\n"
             "• Напоминания (on/off)\n"
             "• Время напоминания\n"
             "• Таймзона\n"
@@ -227,7 +227,7 @@ MAIN_MENU = {
     "en": [["Today"], ["List by date"], ["Settings"]],
 }
 SETTINGS_MENU = {
-    "ru": [["Время сводки"], ["Напоминания", "Время напоминания"], ["Таймзона", "Язык"], ["⬅️ Назад"]],
+    "ru": [["Время списка"], ["Напоминания", "Время напоминания"], ["Таймзона", "Язык"], ["⬅️ Назад"]],
     "en": [["Summary time"], ["Reminders", "Reminder time"], ["Timezone", "Language"], ["⬅️ Back"]],
 }
 
@@ -1002,26 +1002,12 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Главное меню:" if lang=="ru" else "Main menu:", reply_markup=build_main_menu(lang))
             return
 
-        if text in {"Время сводки", "Summary time"}:
+        if text in {"Время списка", "Summary time"}:
             context.chat_data.pop('awaiting_list_date', None)
             context.chat_data.pop('awaiting_lead', None)
             context.chat_data.pop('awaiting_summary_time', None)
             await update.message.reply_text("Во сколько присылать? HH:MM" if lang=="ru" else "What time? HH:MM")
             context.chat_data['awaiting_summary_time'] = True
-            return
-
-        if context.chat_data.get('awaiting_summary_time'):
-            try:
-                hh, mm = map(int, text.split(":"))
-                if not (0 <= hh <= 23 and 0 <= mm <= 59):
-                    raise ValueError
-            except Exception:
-                await update.message.reply_text(T(lang, "time_invalid"))
-                return
-            set_chat_settings(chat_id, hour=hh, minute=mm)
-            await schedule_daily_summary(context, chat_id, reschedule=True)
-            await update.message.reply_text(T(lang, "daily_set", hh=hh, mm=mm, tz=tzname), reply_markup=build_settings_menu(lang))
-            context.chat_data.pop('awaiting_summary_time', None)
             return
 
         if text in {"Напоминания", "Reminders"}:
@@ -1031,31 +1017,20 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             enable = 0 if enabled else 1
             set_chat_settings(chat_id, reminders_enabled=enable)
             await reschedule_all_reminders(context, chat_id)
-            await update.message.reply_text(T(lang, "reminders_on") if enable else T(lang, "reminders_off"), reply_markup=build_settings_menu(lang))
+            await update.message.reply_text(
+                T(lang, "reminders_on") if enable else T(lang, "reminders_off"),
+                reply_markup=build_settings_menu(lang),
+            )
             return
 
         if text == lead_btn:
             context.chat_data.pop('awaiting_list_date', None)
             context.chat_data.pop('awaiting_summary_time', None)
             context.chat_data.pop('awaiting_lead', None)
-            await update.message.reply_text("За сколько минут напоминать? Например: 15 мин" if lang=="ru" else "How many minutes before? e.g., 15 min")
+            await update.message.reply_text(
+                "За сколько минут напоминать? Например: 15 мин" if lang == "ru" else "How many minutes before? e.g., 15 min"
+            )
             context.chat_data['awaiting_lead'] = True
-            return
-
-        if context.chat_data.get('awaiting_lead'):
-            minutes, status = parse_lead_minutes(text)
-            if status == "disable":
-                set_chat_settings(chat_id, reminders_enabled=0)
-                await update.message.reply_text(T(lang, "reminders_off"), reply_markup=build_settings_menu(lang))
-                context.chat_data.pop('awaiting_lead', None)
-                return
-            if status != "ok" or minutes is None or minutes < 0 or minutes > 24*60:
-                await update.message.reply_text(T(lang, "lead_invalid"))
-                return
-            set_chat_settings(chat_id, remind_lead_min=minutes, reminders_enabled=1)
-            await reschedule_all_reminders(context, chat_id)
-            await update.message.reply_text(T(lang, "remind_set", lead=minutes), reply_markup=build_settings_menu(lang))
-            context.chat_data.pop('awaiting_lead', None)
             return
 
         if text in {"Таймзона", "Timezone"}:
@@ -1070,6 +1045,40 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.chat_data.pop('awaiting_summary_time', None)
             context.chat_data.pop('awaiting_lead', None)
             await lang_cmd(update, context)
+            return
+
+        if context.chat_data.get('awaiting_summary_time'):
+            try:
+                hh, mm = map(int, text.split(":"))
+                if not (0 <= hh <= 23 and 0 <= mm <= 59):
+                    raise ValueError
+            except Exception:
+                await update.message.reply_text(T(lang, "time_invalid"))
+                return
+            set_chat_settings(chat_id, hour=hh, minute=mm)
+            await schedule_daily_summary(context, chat_id, reschedule=True)
+            await update.message.reply_text(
+                T(lang, "daily_set", hh=hh, mm=mm, tz=tzname), reply_markup=build_settings_menu(lang)
+            )
+            context.chat_data.pop('awaiting_summary_time', None)
+            return
+
+        if context.chat_data.get('awaiting_lead'):
+            minutes, status = parse_lead_minutes(text)
+            if status == "disable":
+                set_chat_settings(chat_id, reminders_enabled=0)
+                await update.message.reply_text(T(lang, "reminders_off"), reply_markup=build_settings_menu(lang))
+                context.chat_data.pop('awaiting_lead', None)
+                return
+            if status != "ok" or minutes is None or minutes < 0 or minutes > 24 * 60:
+                await update.message.reply_text(T(lang, "lead_invalid"))
+                return
+            set_chat_settings(chat_id, remind_lead_min=minutes, reminders_enabled=1)
+            await reschedule_all_reminders(context, chat_id)
+            await update.message.reply_text(
+                T(lang, "remind_set", lead=minutes), reply_markup=build_settings_menu(lang)
+            )
+            context.chat_data.pop('awaiting_lead', None)
             return
 
     # -------- онбординг: выбор языка --------
@@ -1250,6 +1259,7 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=build_main_menu(lang)
         )
         await schedule_task_reminder(context, chat_id, task_id, due_utc)
+        return
     else:
         tzinfo = pytz.timezone(tzname)
         now_local = datetime.now(tzinfo)
@@ -1257,11 +1267,6 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_task(chat_id, due_local.astimezone(pytz.utc), text or ("Без названия" if lang=="ru" else "Untitled"), 1)
         await update.message.reply_text(T(lang, "added_today_nodt", text=text), reply_markup=build_main_menu(lang))
         return
-
-    await update.message.reply_text(T(lang, "help"), reply_markup=build_main_menu(lang))
-    return
-
-
 # ---------- Онбординг шаги (хелперы) ----------
 
 async def ask_tz_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
