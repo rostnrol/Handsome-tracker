@@ -901,6 +901,14 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stage = context.chat_data.get('onboard_stage')
     text = update.message.text.strip()
 
+    # Auto-guidance: if this is a new chat (no explicit onboarding stage ever set) and user didn't run /start,
+    # show welcome + language choice to guide them.
+    if stage is None and (text.lower() not in {"/start", "start"}):
+        kb = ReplyKeyboardMarkup(LANG_BTNS, resize_keyboard=True, one_time_keyboard=True)
+        await update.message.reply_text(T(lang, "welcome"), reply_markup=kb)
+        context.chat_data['onboard_stage'] = 'lang_select'
+        return
+
     # --- main menu buttons (no slash) ---
     if text in {"Сегодня", "Today"}:
         # Reset any pending awaiting_* flags when switching actions
@@ -1002,6 +1010,7 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await lang_cmd(update, context)
         return
 
+    # If reached here and no special flow triggered, proceed onboarding stages or normal handling.
       # --- онбординг: выбор языка ---
     if stage == "lang_select":
         msg = text.lower()
@@ -1177,7 +1186,7 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         parsed = parse_task_input(text, tzname)
     except InvalidDateTime:
-        await update.message.reply_text(T(lang, "dt_invalid_strict"))
+        await update.message.reply_text(T(lang, "dt_invalid_strict"), reply_markup=build_main_menu(lang))
         return
 
     if parsed:
@@ -1189,7 +1198,8 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             when_suffix = (" at " if lang=="en" else " в ") + due_local.strftime('%H:%M')
         await update.message.reply_text(
-            T(lang, "added_task", text=task_text, date=due_local.strftime('%d.%m'), when=when_suffix)
+            T(lang, "added_task", text=task_text, date=due_local.strftime('%d.%m'), when=when_suffix),
+            reply_markup=build_main_menu(lang)
         )
         await schedule_task_reminder(context, chat_id, task_id, due_utc)
     else:
@@ -1197,8 +1207,12 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         now_local = datetime.now(tzinfo)
         due_local = tzinfo.localize(datetime(now_local.year, now_local.month, now_local.day, 23, 59))
         save_task(chat_id, due_local.astimezone(pytz.utc), text or ("Без названия" if lang=="ru" else "Untitled"), 1)
-        await update.message.reply_text(T(lang, "added_today_nodt", text=text))
+        await update.message.reply_text(T(lang, "added_today_nodt", text=text), reply_markup=build_main_menu(lang))
         return
+
+    # If nothing matched and we somehow didn't add or error, gently guide user with Help and menu.
+    await update.message.reply_text(T(lang, "help"), reply_markup=build_main_menu(lang))
+    return
 
 
 # ---------- Онбординг шаги (хелперы) ----------
@@ -1321,8 +1335,11 @@ def main():
     if not token:
         raise RuntimeError("Set BOT_TOKEN env variable")
 
-    # Determine run mode: webhook (Render) vs polling (local). Use webhook if WEBHOOK_URL is provided.
-    use_webhook = bool(os.getenv("WEBHOOK_URL"))
+    # Determine run mode: webhook (Render) vs polling (local).
+    # Default to webhook on Render (detect via RENDER environment vars) unless POLLING=1 is explicitly set.
+    forced_polling = os.getenv("POLLING") == "1"
+    is_render = bool(os.getenv("RENDER")=="true" or os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID") or os.getenv("RENDER_INSTANCE_ID"))
+    use_webhook = (not forced_polling) and (bool(os.getenv("WEBHOOK_URL")) or is_render)
 
     async def _post_init(app):
         if not use_webhook:
@@ -1349,20 +1366,25 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, any_message))
 
     if use_webhook:
-        # Webhook mode for Render: requires WEBHOOK_URL and PORT env vars
+        # Webhook mode for Render. If WEBHOOK_URL is not set, try to infer from RENDER_EXTERNAL_URL
         import secrets
-        base_url = os.getenv("WEBHOOK_URL").rstrip("/")
-        port = int(os.getenv("PORT", "10000"))
-        path = os.getenv("WEBHOOK_PATH") or ("/" + secrets.token_hex(16))
-        secret = os.getenv("WEBHOOK_SECRET")
-        full_url = base_url + path
+        base_url = (os.getenv("WEBHOOK_URL") or os.getenv("RENDER_EXTERNAL_URL") or "").rstrip("/")
+        if not base_url:
+            # Fail safe: if we can’t determine a public URL, fall back to polling to avoid getUpdates conflict loops
+            print("[webhook] No WEBHOOK_URL/RENDER_EXTERNAL_URL set; falling back to polling.")
+            use_webhook = False
+        if use_webhook:
+            port = int(os.getenv("PORT", "10000"))
+            path = os.getenv("WEBHOOK_PATH") or ("/" + secrets.token_hex(16))
+            secret = os.getenv("WEBHOOK_SECRET")
+            full_url = base_url + path
         # Set webhook with drop_pending_updates to avoid backlog conflicts
         async def _set_hook():
             await app.bot.set_webhook(url=full_url, secret_token=secret, drop_pending_updates=True)
         # PTB run_webhook executes sync; use create_task via app to ensure hook set
         app.create_task(_set_hook())
         app.run_webhook(listen="0.0.0.0", port=port, url_path=path.lstrip("/"))
-    else:
+    if not use_webhook:
         app.run_polling(close_loop=False)
 
 
