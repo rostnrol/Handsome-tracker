@@ -83,16 +83,16 @@ MESSAGES: Dict[str, Dict[str, str]] = {
         ),
         "setup_done_title": "Готово! Всё настроено ✅",
         "setup_done_body": (
-            "Главное меню:\n"
-            "• Сегодня\n"
-            "• Список на дату\n"
-            "• Настройки\n\n"
-            "В Настройках:\n"
-            "• Время списка — во сколько присылать ежедневный список\n"
-            "• Напоминания — включить/выключить\n"
-            "• Время напоминания — за сколько минут напоминать\n"
-            "• Таймзона — обновить часовой пояс\n"
-            "• Язык — сменить язык\n\n"
+            "Главное меню:\n\n"
+            "📃 Cписок на сегодня\n"
+            "📜 Список на дату\n"
+            "🔧 Настройки\n\n"
+            "В Настройках:\n\n"
+            "🕒 Время списка — во сколько присылать ежедневный список\n"
+            "🔔 Напоминания — включить/выключить\n"
+            "⏰ Время напоминания — за сколько минут напоминать\n"
+            "🗺 Таймзона — обновить часовой пояс\n"
+            "🌎 Язык — сменить язык\n\n"
             "💡 В задачах используй двоеточие для времени (16:30), а точку или слэш для даты (31.08, 31/08)."
         ),
         "help": (
@@ -1036,7 +1036,7 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.chat_data.pop('awaiting_list_date', None)
             context.chat_data.pop('awaiting_tz', None)
             context.chat_data.pop('awaiting_lang', None)
-            await update.message.reply_text("Введите дату в формате DD.MM" if lang=="ru" else "Enter date as DD.MM")
+            await update.message.reply_text("Введи дату в формате ДД.ММ" if lang=="ru" else "Enter date as DD.MM")
             context.chat_data['awaiting_list_date'] = True
             return
 
@@ -1086,7 +1086,7 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.chat_data.pop('awaiting_summary_time', None)
             context.chat_data.pop('awaiting_tz', None)
             context.chat_data.pop('awaiting_lang', None)
-            await update.message.reply_text("Во сколько присылать? HH:MM" if lang=="ru" else "What time? HH:MM")
+            await update.message.reply_text("Во сколько присылать? ЧЧ:MM" if lang=="ru" else "What time? HH:MM")
             context.chat_data['awaiting_summary_time'] = True
             return
 
@@ -1246,7 +1246,7 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"{T(lang, 'setup_done_title')}\n\n{T(lang, 'setup_done_body')}")
         context.chat_data.pop('onboard_stage', None)
         set_onboarded(chat_id, True)
-        await update.message.reply_text("Выберите действие:" if lang=="ru" else "Choose an action:", reply_markup=build_main_menu(lang))
+        await update.message.reply_text("Выбери действие или просто начни записывать задачки" if lang=="ru" else "Choose an action:", reply_markup=build_main_menu(lang))
         return
 
     # -------- команды без слэша (legacy) --------
