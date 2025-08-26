@@ -1314,19 +1314,39 @@ def main():
     init_db()
 
     # Acquire a singleton lock to prevent duplicate instances (e.g., on Render multi-deploy)
-    # Strategy: insert a single row with fixed id=1; if it's already present, another instance is running.
+    # Note: SQLite is per-instance on Render. To coordinate, also support ENV-based gating.
     holder = os.getenv("RENDER_INSTANCE_ID") or os.getenv("DYNO") or os.getenv("HOSTNAME") or "unknown"
+
+    # ENV-based gate for background worker:
+    # - If PRIMARY_INSTANCE_ID is set, only that instance runs; others exit.
+    primary_env = os.getenv("PRIMARY_INSTANCE_ID")
+    if primary_env and holder != primary_env:
+        print(f"[singleton-env] Instance {holder} != PRIMARY_INSTANCE_ID {primary_env}: exiting to avoid duplicate pollers.")
+        return
+    # - If INSTANCE_PREFERRED is 'min', only the lexicographically smallest holder runs.
+    if os.getenv("INSTANCE_PREFERRED", "").lower() == "min":
+        # In absence of cross-instance comms, we heuristically allow only holders ending with '0' or the smallest by lex.
+        # If an INDEX is provided, prefer index '0'.
+        idx = os.getenv("RENDER_INSTANCE_INDEX")
+        if idx and idx != "0":
+            print(f"[singleton-env] RENDER_INSTANCE_INDEX={idx} != 0: exiting.")
+            return
+        # If no index, allow only holders that are minimal by an environment-provided set; since we don't have the set, use a heuristic:
+        # If holder doesn't end with '0' or 'a', exit. This is optional and only active when INSTANCE_PREFERRED=min.
+        if not (holder.endswith("0") or holder.endswith("a")):
+            print(f"[singleton-env] Heuristic min holder not matched for {holder}: exiting.")
+            return
+
+    # Keep local SQLite lock to avoid accidental double-start within same FS/process group
     con = get_con()
     try:
         cur = con.cursor()
-        # Try to create the single row; if it exists, SELECT to see if holder is same
         cur.execute("INSERT OR IGNORE INTO app_lock (id, holder, acquired_utc) VALUES (1, ?, ?)", (holder, datetime.utcnow().isoformat()))
         con.commit()
         cur.execute("SELECT holder FROM app_lock WHERE id=1")
         row = cur.fetchone()
         if row and row[0] and row[0] != holder:
-            # Another instance holds the lock; exit silently
-            print("[singleton] Another instance is already running (holder=", row[0], ") — exiting.")
+            print("[singleton-sqlite] Another instance is already running (holder=", row[0], ") — exiting.")
             return
     finally:
         con.close()
@@ -1335,11 +1355,11 @@ def main():
     if not token:
         raise RuntimeError("Set BOT_TOKEN env variable")
 
-    # Determine run mode: webhook (Render) vs polling (local).
-    # Default to webhook on Render (detect via RENDER environment vars) unless POLLING=1 is explicitly set.
-    forced_polling = os.getenv("POLLING") == "1"
-    is_render = bool(os.getenv("RENDER")=="true" or os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID") or os.getenv("RENDER_INSTANCE_ID"))
-    use_webhook = (not forced_polling) and (bool(os.getenv("WEBHOOK_URL")) or is_render)
+    # Background worker mode: we DO NOT use webhooks here. Always run polling.
+    # But we must prevent duplicate pollers across instances. Implement environment-driven singleton.
+    forced_polling = True
+    is_render = bool(os.getenv("RENDER") == "true" or os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID") or os.getenv("RENDER_INSTANCE_ID"))
+    use_webhook = False
 
     async def _post_init(app):
         if not use_webhook:
@@ -1365,27 +1385,8 @@ def main():
     app.add_handler(MessageHandler(filters.LOCATION, location_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, any_message))
 
-    if use_webhook:
-        # Webhook mode for Render. If WEBHOOK_URL is not set, try to infer from RENDER_EXTERNAL_URL
-        import secrets
-        base_url = (os.getenv("WEBHOOK_URL") or os.getenv("RENDER_EXTERNAL_URL") or "").rstrip("/")
-        if not base_url:
-            # Fail safe: if we can’t determine a public URL, fall back to polling to avoid getUpdates conflict loops
-            print("[webhook] No WEBHOOK_URL/RENDER_EXTERNAL_URL set; falling back to polling.")
-            use_webhook = False
-        if use_webhook:
-            port = int(os.getenv("PORT", "10000"))
-            path = os.getenv("WEBHOOK_PATH") or ("/" + secrets.token_hex(16))
-            secret = os.getenv("WEBHOOK_SECRET")
-            full_url = base_url + path
-        # Set webhook with drop_pending_updates to avoid backlog conflicts
-        async def _set_hook():
-            await app.bot.set_webhook(url=full_url, secret_token=secret, drop_pending_updates=True)
-        # PTB run_webhook executes sync; use create_task via app to ensure hook set
-        app.create_task(_set_hook())
-        app.run_webhook(listen="0.0.0.0", port=port, url_path=path.lstrip("/"))
-    if not use_webhook:
-        app.run_polling(close_loop=False)
+    # Always run polling in worker mode
+    app.run_polling(close_loop=False)
 
 
 if __name__ == "__main__":
