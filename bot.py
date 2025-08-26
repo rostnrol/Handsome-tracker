@@ -13,6 +13,7 @@ Telegram Task Tracker Bot
 import os
 import re
 import sqlite3
+import time as time_module
 from datetime import datetime, time, timedelta
 from typing import Optional, Tuple, List, Dict
 
@@ -475,6 +476,15 @@ def _strict_dt_parse(text: str, chat_tz: str):
         raise InvalidDateTime("bad calendar date")
 
     due_utc = local_dt.astimezone(pytz.utc)
+
+    if due_utc < datetime.now(pytz.utc) - timedelta(minutes=1):
+        if not date_re and time_re:
+            due_utc += timedelta(days=1)
+        else:
+            try:
+                due_utc = due_utc.replace(year=due_utc.year + 1)
+            except ValueError:
+                pass
 
     task_text = text
     if date_re:
@@ -1412,12 +1422,17 @@ def main():
     app.add_handler(MessageHandler(filters.LOCATION, location_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, any_message))
 
-    try:
-        app.run_polling(close_loop=False)
-    except Conflict as e:
-        print("[polling] Exiting due to Telegram Conflict (another getUpdates request is active):", str(e))
-        import sys
-        sys.exit(0)
+    while True:
+        try:
+            app.run_polling(close_loop=False)
+            break
+        except Conflict as e:
+            print(
+                "[polling] Conflict detected (another getUpdates request is active). "
+                "Retrying in 5 seconds...",
+                str(e),
+            )
+            time_module.sleep(5)
 
 
 if __name__ == "__main__":
