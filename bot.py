@@ -1018,52 +1018,66 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ------------ Главное меню ------------
-    if not in_settings:
-        if text in {"Сегодня", "Today"}:
-            context.chat_data.pop('awaiting_list_date', None)
-            context.chat_data.pop('awaiting_summary_time', None)
-            context.chat_data.pop('awaiting_lead', None)
-            context.chat_data.pop('awaiting_tz', None)
-            context.chat_data.pop('awaiting_lang', None)
-            now_local = datetime.now(pytz.timezone(tzname))
-            tasks = fetch_tasks_for_date(chat_id, now_local, tzname)
-            await update.message.reply_text(T(lang, "today_list", date=now_local.strftime('%d.%m'), list=format_tasks(lang, tasks)), reply_markup=build_main_menu(lang))
+    if text in {"Сегодня", "Today"}:
+        context.chat_data['in_settings'] = False
+        context.chat_data.pop('awaiting_list_date', None)
+        context.chat_data.pop('awaiting_summary_time', None)
+        context.chat_data.pop('awaiting_lead', None)
+        context.chat_data.pop('awaiting_tz', None)
+        context.chat_data.pop('awaiting_lang', None)
+        now_local = datetime.now(pytz.timezone(tzname))
+        tasks = fetch_tasks_for_date(chat_id, now_local, tzname)
+        await update.message.reply_text(
+            T(lang, "today_list", date=now_local.strftime('%d.%m'), list=format_tasks(lang, tasks)),
+            reply_markup=build_main_menu(lang),
+        )
+        return
+
+    if text in {"Список на дату", "List by date"}:
+        context.chat_data['in_settings'] = False
+        context.chat_data.pop('awaiting_summary_time', None)
+        context.chat_data.pop('awaiting_lead', None)
+        context.chat_data.pop('awaiting_list_date', None)
+        context.chat_data.pop('awaiting_tz', None)
+        context.chat_data.pop('awaiting_lang', None)
+        await update.message.reply_text(
+            "Введи дату в формате ДД.ММ" if lang == "ru" else "Enter date as DD.MM"
+        )
+        context.chat_data['awaiting_list_date'] = True
+        return
+
+    if context.chat_data.get('awaiting_list_date'):
+        m = re.fullmatch(r"\s*(\d{1,2})[./](\d{1,2})\s*", text)
+        if m:
+            dd, mm = int(m.group(1)), int(m.group(2))
+            try:
+                now_local = datetime.now(pytz.timezone(tzname))
+                target = datetime(now_local.year, mm, dd)
+                tasks = fetch_tasks_for_date(chat_id, target, tzname)
+                await update.message.reply_text(
+                    T(lang, "on_list", date=target.strftime('%d.%m'), list=format_tasks(lang, tasks)),
+                    reply_markup=build_main_menu(lang),
+                )
+            except Exception:
+                await update.message.reply_text(T(lang, "format_list"))
+            finally:
+                context.chat_data.pop('awaiting_list_date', None)
             return
 
-        if text in {"Список на дату", "List by date"}:
-            context.chat_data.pop('awaiting_summary_time', None)
-            context.chat_data.pop('awaiting_lead', None)
-            context.chat_data.pop('awaiting_list_date', None)
-            context.chat_data.pop('awaiting_tz', None)
-            context.chat_data.pop('awaiting_lang', None)
-            await update.message.reply_text("Введи дату в формате ДД.ММ" if lang=="ru" else "Enter date as DD.MM")
-            context.chat_data['awaiting_list_date'] = True
-            return
+    if text in {"Настройки", "Settings"}:
+        context.chat_data.pop('awaiting_list_date', None)
+        context.chat_data.pop('awaiting_summary_time', None)
+        context.chat_data.pop('awaiting_lead', None)
+        context.chat_data.pop('awaiting_tz', None)
+        context.chat_data.pop('awaiting_lang', None)
+        context.chat_data['in_settings'] = True
+        await update.message.reply_text(
+            "Настройки:" if lang == "ru" else "Settings:",
+            reply_markup=build_settings_menu(lang),
+        )
+        return
 
-        if context.chat_data.get('awaiting_list_date'):
-            m = re.fullmatch(r"\s*(\d{1,2})[./](\d{1,2})\s*", text)
-            if m:
-                dd, mm = int(m.group(1)), int(m.group(2))
-                try:
-                    now_local = datetime.now(pytz.timezone(tzname))
-                    target = datetime(now_local.year, mm, dd)
-                    tasks = fetch_tasks_for_date(chat_id, target, tzname)
-                    await update.message.reply_text(T(lang, "on_list", date=target.strftime('%d.%m'), list=format_tasks(lang, tasks)), reply_markup=build_main_menu(lang))
-                except Exception:
-                    await update.message.reply_text(T(lang, "format_list"))
-                finally:
-                    context.chat_data.pop('awaiting_list_date', None)
-                return
-
-        if text in {"Настройки", "Settings"}:
-            context.chat_data.pop('awaiting_list_date', None)
-            context.chat_data.pop('awaiting_summary_time', None)
-            context.chat_data.pop('awaiting_lead', None)
-            context.chat_data.pop('awaiting_tz', None)
-            context.chat_data.pop('awaiting_lang', None)
-            context.chat_data['in_settings'] = True
-            await update.message.reply_text("Настройки:" if lang=="ru" else "Settings:", reply_markup=build_settings_menu(lang))
-            return
+    in_settings = context.chat_data.get('in_settings', False)
 
     # ------------ Под-меню Настройки ------------
     if in_settings:
@@ -1340,6 +1354,7 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if parsed:
+        context.chat_data['in_settings'] = False
         due_utc, task_text, all_day = parsed
         task_id = save_task(chat_id, due_utc, task_text, all_day)
         due_local = due_utc.astimezone(pytz.timezone(tzname))
@@ -1351,6 +1366,7 @@ async def any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await schedule_task_reminder(context, chat_id, task_id, due_utc)
         return
     else:
+        context.chat_data['in_settings'] = False
         tzinfo = pytz.timezone(tzname)
         now_local = datetime.now(tzinfo)
         due_local = tzinfo.localize(datetime(now_local.year, now_local.month, now_local.day, 23, 59))
