@@ -499,7 +499,7 @@ def _strict_dt_parse(text: str, chat_tz: str):
 def parse_task_input(text: str, chat_tz: str):
     tzinfo = pytz.timezone(chat_tz)
     now_local = datetime.now(tzinfo)
-
+    
     def normalize_units(txt: str) -> str:
         def repl_hours(m: re.Match) -> str:
             before = m.string[: m.start()].lower()
@@ -532,7 +532,7 @@ def parse_task_input(text: str, chat_tz: str):
         return txt
 
     text = normalize_units(text)
-
+    
     m1 = re.search(r"\b(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?\s+(\d{1,2}):(\d{2})\b", text)
     m2 = re.search(r"\b(\d{1,2}):(\d{2})\s+(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?\b", text)
     match_used = None
