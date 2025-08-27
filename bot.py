@@ -500,6 +500,17 @@ def parse_task_input(text: str, chat_tz: str):
     tzinfo = pytz.timezone(chat_tz)
     now_local = datetime.now(tzinfo)
 
+    def repl_h(m: re.Match) -> str:
+        start = m.start()
+        before = text[:start].lower()
+        if before.endswith("in ") or before.endswith("через "):
+            return m.group(0)
+        hh = int(m.group(1))
+        mn = int(m.group(2)) if m.group(2) else 0
+        return f"{hh}:{mn:02d}"
+
+    text = re.sub(r"\b(\d{1,2})h(\d{2})?\b", repl_h, text, flags=re.IGNORECASE)
+
     m1 = re.search(r"\b(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?\s+(\d{1,2}):(\d{2})\b", text)
     m2 = re.search(r"\b(\d{1,2}):(\d{2})\s+(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?\b", text)
     match_used = None
