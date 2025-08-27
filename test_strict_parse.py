@@ -19,5 +19,13 @@ class TestStrictDateParse(unittest.TestCase):
         expected = (past + timedelta(days=1)).replace(second=0, microsecond=0)
         self.assertEqual(due_utc, expected)
 
+    def test_h_time_format(self):
+        now_utc = datetime.now(pytz.utc)
+        due_utc, _, _ = parse_task_input('14h', 'UTC')
+        expected = now_utc.replace(hour=14, minute=0, second=0, microsecond=0)
+        if expected <= now_utc:
+            expected += timedelta(days=1)
+        self.assertEqual(due_utc, expected)
+
 if __name__ == '__main__':
     unittest.main()
