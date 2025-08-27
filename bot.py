@@ -499,18 +499,40 @@ def _strict_dt_parse(text: str, chat_tz: str):
 def parse_task_input(text: str, chat_tz: str):
     tzinfo = pytz.timezone(chat_tz)
     now_local = datetime.now(tzinfo)
+    
+    def normalize_units(txt: str) -> str:
+        def repl_hours(m: re.Match) -> str:
+            before = m.string[: m.start()].lower()
+            if re.search(r"(?:^|\s)(in|через)$", before):
+                return m.group(0)
+            hh = int(m.group("hh"))
+            mm = int(m.group("mm")) if m.group("mm") else 0
+            return f"{hh}:{mm:02d}"
 
-    def repl_h(m: re.Match) -> str:
-        start = m.start()
-        before = text[:start].lower()
-        if before.endswith("in ") or before.endswith("через "):
-            return m.group(0)
-        hh = int(m.group(1))
-        mn = int(m.group(2)) if m.group(2) else 0
-        return f"{hh}:{mn:02d}"
+        hr_pattern_en = r"\b(?P<hh>\d{1,2})\s*h(?:\s*(?P<mm>\d{1,2})\s*(?:m(?:in)?s?)?)?\b"
+        hr_pattern_ru = r"\b(?P<hh>\d{1,2})\s*ч(?:\s*(?P<mm>\d{1,2})\s*(?:м|мин)?)?\b"
+        txt = re.sub(hr_pattern_en, repl_hours, txt, flags=re.IGNORECASE)
+        txt = re.sub(hr_pattern_ru, repl_hours, txt, flags=re.IGNORECASE)
 
-    text = re.sub(r"\b(\d{1,2})h(\d{2})?\b", repl_h, text, flags=re.IGNORECASE)
+        def repl_minutes(m: re.Match) -> str:
+            before = m.string[: m.start()].lower()
+            if re.search(r"(?:^|\s)(in|через)$", before):
+                return m.group(0)
+            if m.start() > 0 and m.string[m.start() - 1] == ":":
+                return m.group(0)
+            total = int(m.group("m"))
+            hh = total // 60
+            mm = total % 60
+            return f"{hh}:{mm:02d}"
 
+        min_pattern_en = r"\b(?P<m>\d{1,3})\s*m(?:in|ins)?\b"
+        min_pattern_ru = r"\b(?P<m>\d{1,3})\s*м(?:ин)?\b"
+        txt = re.sub(min_pattern_en, repl_minutes, txt, flags=re.IGNORECASE)
+        txt = re.sub(min_pattern_ru, repl_minutes, txt, flags=re.IGNORECASE)
+        return txt
+
+    text = normalize_units(text)
+    
     m1 = re.search(r"\b(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?\s+(\d{1,2}):(\d{2})\b", text)
     m2 = re.search(r"\b(\d{1,2}):(\d{2})\s+(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?\b", text)
     match_used = None
