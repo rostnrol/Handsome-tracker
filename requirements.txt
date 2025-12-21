@@ -1,5 +1,10 @@
 python-telegram-bot[job-queue]==20.7
 pytz==2024.1
-python-dateutil==2.9.0
-dateparser==1.2.0
 timezonefinder==6.5.2
+openai>=1.0.0
+google-auth-oauthlib>=1.0.0
+google-auth>=2.0.0
+google-api-python-client>=2.0.0
+amplitude-analytics>=1.0.0
+python-dotenv>=1.0.0
+apscheduler>=3.10.0
