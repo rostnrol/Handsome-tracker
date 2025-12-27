@@ -45,3 +45,23 @@ def get_user_timezone(chat_id: int) -> Optional[str]:
     con.close()
     return row[0] if row else None
 
+
+def get_morning_time(chat_id: int) -> str:
+    """Получает время утренней сводки в формате HH:MM"""
+    con = get_con()
+    cur = con.cursor()
+    cur.execute("SELECT morning_time FROM settings WHERE chat_id=?", (chat_id,))
+    row = cur.fetchone()
+    con.close()
+    return row[0] if row and row[0] else "09:00"
+
+
+def get_evening_time(chat_id: int) -> str:
+    """Получает время вечерней сводки в формате HH:MM"""
+    con = get_con()
+    cur = con.cursor()
+    cur.execute("SELECT evening_time FROM settings WHERE chat_id=?", (chat_id,))
+    row = cur.fetchone()
+    con.close()
+    return row[0] if row and row[0] else "21:00"
+

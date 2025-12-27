@@ -34,7 +34,7 @@ from services.calendar_service import (
     create_event
 )
 from services.analytics_service import track_event
-from services.scheduler_service import schedule_morning_briefing, start_scheduler
+from services.scheduler_service import start_scheduler
 from services.db_service import get_google_tokens
 
 # ---- timezonefinder (pure Python) ----
@@ -47,8 +47,6 @@ except Exception:
 
 DB_PATH = os.getenv("DB_PATH", "tasks.db")
 DEFAULT_TZ = os.getenv("DEFAULT_TZ", "UTC")
-MORNING_BRIEFING_HOUR = 9
-MORNING_BRIEFING_MINUTE = 0
 
 TF = None  # lazy TimezoneFinder singleton
 
@@ -64,21 +62,27 @@ def build_main_menu() -> ReplyKeyboardMarkup:
 
 
 def build_timezone_keyboard() -> ReplyKeyboardMarkup:
-    """Создает клавиатуру для выбора таймзоны"""
-    # Популярные таймзоны UTC-5 до UTC+3
-    timezones = [
-        ["UTC-5 (EST)", "UTC-4 (EDT)"],
-        ["UTC-3 (BRT)", "UTC-2"],
-        ["UTC-1", "UTC+0 (GMT)"],
-        ["UTC+1 (CET)", "UTC+2 (EET)"],
-        ["UTC+3 (MSK)"]
-    ]
+    """Создает клавиатуру для выбора таймзоны (3 варианта)"""
     keyboard = [
         [KeyboardButton("📍 Share Location", request_location=True)],
-        *timezones,
-        [KeyboardButton("🌍 Enter Manually")]
+        [KeyboardButton("✏️ Enter City Manually")],
+        [KeyboardButton("🌍 Choose from UTC List")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
+
+
+def build_utc_list_keyboard() -> ReplyKeyboardMarkup:
+    """Создает клавиатуру со списком UTC таймзон"""
+    timezones = [
+        ["UTC-12", "UTC-11", "UTC-10", "UTC-9"],
+        ["UTC-8", "UTC-7", "UTC-6", "UTC-5"],
+        ["UTC-4", "UTC-3", "UTC-2", "UTC-1"],
+        ["UTC+0", "UTC+1", "UTC+2", "UTC+3"],
+        ["UTC+4", "UTC+5", "UTC+6", "UTC+7"],
+        ["UTC+8", "UTC+9", "UTC+10", "UTC+11"],
+        ["UTC+12", "⬅️ Back"]
+    ]
+    return ReplyKeyboardMarkup(timezones, resize_keyboard=True, one_time_keyboard=True)
 
 
 # ----------------- Storage -----------------
@@ -90,11 +94,38 @@ def init_db():
         """
         CREATE TABLE IF NOT EXISTS settings (
             chat_id INTEGER PRIMARY KEY,
-            tz TEXT NOT NULL,
+            tz TEXT,
+            user_name TEXT,
+            morning_time TEXT NOT NULL DEFAULT '09:00',
+            evening_time TEXT NOT NULL DEFAULT '21:00',
             onboard_done INTEGER NOT NULL DEFAULT 0
         )
         """
     )
+    # Мягкие миграции для существующих БД
+    try:
+        cur.execute("ALTER TABLE settings ADD COLUMN user_name TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cur.execute("ALTER TABLE settings ADD COLUMN morning_time TEXT NOT NULL DEFAULT '09:00'")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cur.execute("ALTER TABLE settings ADD COLUMN evening_time TEXT NOT NULL DEFAULT '21:00'")
+    except sqlite3.OperationalError:
+        pass
+    # Миграция старых полей briefing_hour/briefing_minute в morning_time
+    try:
+        cur.execute("SELECT briefing_hour, briefing_minute FROM settings LIMIT 1")
+        # Если поля существуют, мигрируем данные
+        cur.execute("""
+            UPDATE settings 
+            SET morning_time = printf('%02d:%02d', briefing_hour, briefing_minute)
+            WHERE morning_time = '09:00' AND briefing_hour IS NOT NULL
+        """)
+    except sqlite3.OperationalError:
+        pass
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS app_lock (
@@ -128,7 +159,7 @@ def get_con():
 
 # ----------------- Helpers -----------------
 
-def get_user_timezone(chat_id: int) -> str:
+def get_user_timezone(chat_id: int) -> Optional[str]:
     """Получает таймзону пользователя"""
     con = get_con()
     cur = con.cursor()
@@ -138,17 +169,95 @@ def get_user_timezone(chat_id: int) -> str:
     return row[0] if row else None
 
 
+def get_user_name(chat_id: int) -> Optional[str]:
+    """Получает имя пользователя"""
+    con = get_con()
+    cur = con.cursor()
+    cur.execute("SELECT user_name FROM settings WHERE chat_id=?", (chat_id,))
+    row = cur.fetchone()
+    con.close()
+    return row[0] if row else None
+
+
+def get_morning_time(chat_id: int) -> str:
+    """Получает время утренней сводки в формате HH:MM"""
+    con = get_con()
+    cur = con.cursor()
+    cur.execute("SELECT morning_time FROM settings WHERE chat_id=?", (chat_id,))
+    row = cur.fetchone()
+    con.close()
+    return row[0] if row and row[0] else "09:00"
+
+
+def get_evening_time(chat_id: int) -> str:
+    """Получает время вечерней сводки в формате HH:MM"""
+    con = get_con()
+    cur = con.cursor()
+    cur.execute("SELECT evening_time FROM settings WHERE chat_id=?", (chat_id,))
+    row = cur.fetchone()
+    con.close()
+    return row[0] if row and row[0] else "21:00"
+
+
 def set_user_timezone(chat_id: int, tzname: str):
     """Устанавливает таймзону пользователя"""
     con = get_con()
     cur = con.cursor()
     cur.execute(
         """
-        INSERT INTO settings (chat_id, tz, onboard_done)
-        VALUES (?, ?, COALESCE((SELECT onboard_done FROM settings WHERE chat_id=?), 0))
+        INSERT INTO settings (chat_id, tz, morning_time, evening_time, onboard_done)
+        VALUES (?, ?, ?, ?, COALESCE((SELECT onboard_done FROM settings WHERE chat_id=?), 0))
         ON CONFLICT(chat_id) DO UPDATE SET tz=excluded.tz
         """,
-        (chat_id, tzname, chat_id),
+        (chat_id, tzname, "09:00", "21:00", chat_id),
+    )
+    con.commit()
+    con.close()
+
+
+def set_user_name(chat_id: int, name: str):
+    """Устанавливает имя пользователя"""
+    con = get_con()
+    cur = con.cursor()
+    cur.execute(
+        """
+        INSERT INTO settings (chat_id, user_name, morning_time, evening_time, onboard_done)
+        VALUES (?, ?, ?, ?, COALESCE((SELECT onboard_done FROM settings WHERE chat_id=?), 0))
+        ON CONFLICT(chat_id) DO UPDATE SET user_name=excluded.user_name
+        """,
+        (chat_id, name, "09:00", "21:00", chat_id),
+    )
+    con.commit()
+    con.close()
+
+
+def set_morning_time(chat_id: int, time_str: str):
+    """Устанавливает время утренней сводки в формате HH:MM"""
+    con = get_con()
+    cur = con.cursor()
+    cur.execute(
+        """
+        INSERT INTO settings (chat_id, morning_time, evening_time, onboard_done)
+        VALUES (?, ?, ?, COALESCE((SELECT onboard_done FROM settings WHERE chat_id=?), 0))
+        ON CONFLICT(chat_id) DO UPDATE SET morning_time=excluded.morning_time
+        """,
+        (chat_id, time_str, "21:00", chat_id),
+    )
+    con.commit()
+    con.close()
+
+
+def set_evening_time(chat_id: int, time_str: str):
+    """Устанавливает время вечерней сводки в формате HH:MM"""
+    con = get_con()
+    cur = con.cursor()
+    cur.execute(
+        """
+        INSERT INTO settings (chat_id, morning_time, evening_time, onboard_done)
+        VALUES (?, ?, ?, COALESCE((SELECT onboard_done FROM settings WHERE chat_id=?), 0))
+        ON CONFLICT(chat_id) DO UPDATE SET evening_time=excluded.evening_time
+        """,
+        (chat_id, "09:00", time_str, chat_id),
     )
     con.commit()
     con.close()
@@ -237,22 +346,38 @@ def tz_from_location(lat: float, lon: float) -> Optional[str]:
 
 
 def parse_utc_offset(text: str) -> Optional[str]:
-    """Парсит UTC offset из текста (например, "UTC-5" -> "America/New_York")"""
+    """Парсит UTC offset из текста (например, "UTC-5" -> таймзона)"""
     text = text.strip().upper()
     if not text.startswith("UTC"):
         return None
     
-    # Популярные маппинги
+    # Маппинг UTC offset к таймзонам
     tz_map = {
-        "UTC-5": "America/New_York",  # EST
-        "UTC-4": "America/New_York",  # EDT
-        "UTC-3": "America/Sao_Paulo",  # BRT
+        "UTC-12": "Etc/GMT+12",
+        "UTC-11": "Pacific/Midway",
+        "UTC-10": "Pacific/Honolulu",
+        "UTC-9": "America/Anchorage",
+        "UTC-8": "America/Los_Angeles",
+        "UTC-7": "America/Denver",
+        "UTC-6": "America/Chicago",
+        "UTC-5": "America/New_York",
+        "UTC-4": "America/Halifax",
+        "UTC-3": "America/Sao_Paulo",
         "UTC-2": "Atlantic/South_Georgia",
         "UTC-1": "Atlantic/Azores",
-        "UTC+0": "Europe/London",  # GMT
-        "UTC+1": "Europe/Paris",  # CET
-        "UTC+2": "Europe/Kiev",  # EET
-        "UTC+3": "Europe/Moscow",  # MSK
+        "UTC+0": "Europe/London",
+        "UTC+1": "Europe/Paris",
+        "UTC+2": "Europe/Kiev",
+        "UTC+3": "Europe/Moscow",
+        "UTC+4": "Asia/Dubai",
+        "UTC+5": "Asia/Karachi",
+        "UTC+6": "Asia/Dhaka",
+        "UTC+7": "Asia/Bangkok",
+        "UTC+8": "Asia/Shanghai",
+        "UTC+9": "Asia/Tokyo",
+        "UTC+10": "Australia/Sydney",
+        "UTC+11": "Pacific/Norfolk",
+        "UTC+12": "Pacific/Auckland",
     }
     
     # Извлекаем UTC offset
@@ -279,8 +404,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Проверяем, прошел ли онбординг
     if is_onboarded(chat_id):
         # Пользователь уже прошел онбординг - показываем меню
+        user_name = get_user_name(chat_id)
+        greeting = f"Welcome back, {user_name}! 👋" if user_name else "Welcome back! 👋"
         await update.message.reply_text(
-            "Welcome back! 👋\n\n"
+            f"{greeting}\n\n"
             "Send me tasks in any format:\n"
             "• Text messages\n"
             "• Voice messages\n"
@@ -289,16 +416,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # Шаг 1: Запрос таймзоны
+    # Шаг 1: Приветственное сообщение
     await update.message.reply_text(
-        "Hi! 👋 Let's set up your timezone first.\n\n"
-        "You can:\n"
-        "• Share your location (recommended)\n"
-        "• Choose from the list below\n"
-        "• Enter manually (e.g., Europe/London)",
-        reply_markup=build_timezone_keyboard()
+        "Hi! 👋 I am a task tracker you've been dreaming of\n"
+        "With me you won't forget a thing\n\n"
+        "Every morning, I'll send you a briefing of your day\n"
+        "You can send me tasks in ANY format: Voice messages, Text, or even Photos of notes/schedules\n"
+        "I will instantly add them to your Google Calendar\n"
+        "During the day you can see your tasks in a little app here and mark the completed ones\n" 
+        "Every evening, I'll send you a brief summary of your day, and we'll reflect on what can be transferred to the next day, and what can be forgotten\n\n"
+        "Let's set you up! 🚀"
     )
-    context.chat_data['onboard_stage'] = 'timezone'
+    
+    # Шаг 2: Вопрос об имени
+    await update.message.reply_text(
+        "1️⃣ How should I address you?",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    context.chat_data['onboard_stage'] = 'ask_name'
 
 
 async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -307,36 +442,92 @@ async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     chat_id = update.effective_chat.id
+    
+    # Проверяем, на каком этапе онбординга
+    if context.chat_data.get('onboard_stage') != 'timezone':
+        return
+    
     lat = update.message.location.latitude
     lon = update.message.location.longitude
     
     tz = tz_from_location(lat, lon)
     if tz:
         set_user_timezone(chat_id, tz)
-        await continue_onboarding(update, context)
+        await ask_morning_time(update, context)
     else:
         await update.message.reply_text(
-            "Couldn't determine timezone from location. Please try selecting from the list or enter manually.",
+            "Couldn't determine timezone from location. Please try another option.",
             reply_markup=build_timezone_keyboard()
         )
 
 
-async def continue_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Продолжение онбординга после выбора таймзоны"""
+async def ask_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Вопрос о таймзоне"""
+    await update.message.reply_text(
+        "2️⃣ What's your timezone?\n\n"
+        "You can:\n"
+        "• Share your location (recommended)\n"
+        "• Enter city manually\n"
+        "• Choose from UTC list",
+        reply_markup=build_timezone_keyboard()
+    )
+    context.chat_data['onboard_stage'] = 'timezone'
+
+
+def build_morning_time_keyboard() -> ReplyKeyboardMarkup:
+    """Создает клавиатуру для выбора времени утренней сводки"""
+    keyboard = [
+        [KeyboardButton("08:00"), KeyboardButton("09:00"), KeyboardButton("10:00")],
+        [KeyboardButton("✏️ Enter Manually")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
+
+
+def build_evening_time_keyboard() -> ReplyKeyboardMarkup:
+    """Создает клавиатуру для выбора времени вечерней сводки"""
+    keyboard = [
+        [KeyboardButton("18:00"), KeyboardButton("21:00"), KeyboardButton("23:00")],
+        [KeyboardButton("✏️ Enter Manually")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
+
+
+async def ask_morning_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Вопрос о времени утренней сводки"""
+    await update.message.reply_text(
+        "3️⃣ At what time do you want to receive your Daily Plan?",
+        reply_markup=build_morning_time_keyboard()
+    )
+    context.chat_data['onboard_stage'] = 'ask_morning_time'
+
+
+async def ask_evening_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Вопрос о времени вечерней сводки"""
+    await update.message.reply_text(
+        "4️⃣ When should I send you the Evening Recap?",
+        reply_markup=build_evening_time_keyboard()
+    )
+    context.chat_data['onboard_stage'] = 'ask_evening_time'
+
+
+async def finish_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Завершение онбординга - подключение Google Calendar"""
     chat_id = update.effective_chat.id
     
-    # Шаг 2: Welcome message и кнопка подключения Google Calendar
+    # Кнопка подключения Google Calendar
     auth_url = get_authorization_url(chat_id)
     
     keyboard = [[KeyboardButton("🔗 Connect Google Calendar")]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
     
+    user_name = get_user_name(chat_id)
+    greeting = f"Perfect, {user_name}! ✅" if user_name else "Perfect! ✅"
+    
     await update.message.reply_text(
-        "Perfect! ✅\n\n"
-        "Hi! I am your AI Assistant. Every morning at 9:00 AM, I'll send you a briefing of your day. "
-        "You can send me tasks in ANY format: Voice messages, Text, or even Photos of notes/schedules. "
-        "I will instantly add them to your Google Calendar.\n\n"
-        f"To get started, connect your Google Calendar:\n{auth_url}",
+        f"{greeting}\n\n"
+        "To get started, connect your Google Calendar:\n"
+        f"{auth_url}\n\n"
+        "After authorization, send me the code you receive.",
         reply_markup=reply_markup
     )
     
@@ -353,46 +544,171 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     text = update.message.text.strip()
     
     # Обработка онбординга
+    if context.chat_data.get('onboard_stage') == 'ask_name':
+        # Вопрос об имени
+        if text.strip():
+            set_user_name(chat_id, text.strip())
+            await ask_timezone(update, context)
+        else:
+            await update.message.reply_text(
+                "Please enter your name:"
+            )
+        return
+    
     if context.chat_data.get('onboard_stage') == 'timezone':
         # Пользователь выбирает таймзону
-        if text == "🌍 Enter Manually":
+        if text == "✏️ Enter City Manually":
             await update.message.reply_text(
-                "Please enter your timezone manually (e.g., Europe/London, America/New_York, Asia/Tokyo):",
+                "Please enter your city/timezone manually (e.g., Europe/London, America/New_York, Asia/Tokyo):",
                 reply_markup=ReplyKeyboardRemove()
             )
             context.chat_data['onboard_stage'] = 'timezone_manual'
             return
         
-        # Проверяем UTC offset
-        tz = parse_utc_offset(text)
-        if tz:
-            set_user_timezone(chat_id, tz)
-            await continue_onboarding(update, context)
+        if text == "🌍 Choose from UTC List":
+            await update.message.reply_text(
+                "Choose your UTC offset:",
+                reply_markup=build_utc_list_keyboard()
+            )
+            context.chat_data['onboard_stage'] = 'timezone_utc_list'
             return
         
-        # Проверяем, является ли это валидной таймзоной
-        try:
-            pytz.timezone(text)
-            set_user_timezone(chat_id, text)
-            await continue_onboarding(update, context)
-            return
-        except pytz.exceptions.UnknownTimeZoneError:
-            await update.message.reply_text(
-                "Invalid timezone. Please select from the list or enter a valid timezone (e.g., Europe/London):",
-                reply_markup=build_timezone_keyboard()
-            )
-            return
+        # Если это не кнопка, значит пользователь ввел что-то другое
+        await update.message.reply_text(
+            "Please choose one of the options:",
+            reply_markup=build_timezone_keyboard()
+        )
+        return
     
     if context.chat_data.get('onboard_stage') == 'timezone_manual':
         # Пользователь вводит таймзону вручную
         try:
             pytz.timezone(text)
             set_user_timezone(chat_id, text)
-            await continue_onboarding(update, context)
+            await ask_morning_time(update, context)
             return
         except pytz.exceptions.UnknownTimeZoneError:
             await update.message.reply_text(
                 "Invalid timezone. Please enter a valid timezone (e.g., Europe/London, America/New_York):"
+            )
+            return
+    
+    if context.chat_data.get('onboard_stage') == 'timezone_utc_list':
+        # Пользователь выбрал UTC из списка
+        if text == "⬅️ Back":
+            await ask_timezone(update, context)
+            return
+        
+        # Парсим UTC offset
+        tz = parse_utc_offset(text)
+        if tz:
+            set_user_timezone(chat_id, tz)
+            await ask_morning_time(update, context)
+            return
+        else:
+            await update.message.reply_text(
+                "Invalid selection. Please choose from the list:",
+                reply_markup=build_utc_list_keyboard()
+            )
+            return
+    
+    if context.chat_data.get('onboard_stage') == 'ask_morning_time':
+        # Вопрос о времени утренней сводки
+        if text == "✏️ Enter Manually":
+            await update.message.reply_text(
+                "Please enter time in format HH:MM (e.g., 09:00, 08:30):",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            context.chat_data['onboard_stage'] = 'ask_morning_time_manual'
+            return
+        
+        # Проверяем, является ли это валидным временем
+        try:
+            if ':' in text:
+                parts = text.split(':')
+                if len(parts) == 2:
+                    hour = int(parts[0].strip())
+                    minute = int(parts[1].strip())
+                    if 0 <= hour <= 23 and 0 <= minute <= 59:
+                        time_str = f"{hour:02d}:{minute:02d}"
+                        set_morning_time(chat_id, time_str)
+                        await ask_evening_time(update, context)
+                        return
+            raise ValueError("Invalid time format")
+        except (ValueError, IndexError):
+            await update.message.reply_text(
+                "Invalid time format. Please choose from the buttons or enter manually:",
+                reply_markup=build_morning_time_keyboard()
+            )
+            return
+    
+    if context.chat_data.get('onboard_stage') == 'ask_morning_time_manual':
+        # Пользователь вводит время утренней сводки вручную
+        try:
+            if ':' in text:
+                parts = text.split(':')
+                if len(parts) == 2:
+                    hour = int(parts[0].strip())
+                    minute = int(parts[1].strip())
+                    if 0 <= hour <= 23 and 0 <= minute <= 59:
+                        time_str = f"{hour:02d}:{minute:02d}"
+                        set_morning_time(chat_id, time_str)
+                        await ask_evening_time(update, context)
+                        return
+            raise ValueError("Invalid time format")
+        except (ValueError, IndexError):
+            await update.message.reply_text(
+                "Invalid time format. Please enter time in HH:MM format (e.g., 09:00, 08:30):"
+            )
+            return
+    
+    if context.chat_data.get('onboard_stage') == 'ask_evening_time':
+        # Вопрос о времени вечерней сводки
+        if text == "✏️ Enter Manually":
+            await update.message.reply_text(
+                "Please enter time in format HH:MM (e.g., 21:00, 23:00):",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            context.chat_data['onboard_stage'] = 'ask_evening_time_manual'
+            return
+        
+        # Проверяем, является ли это валидным временем
+        try:
+            if ':' in text:
+                parts = text.split(':')
+                if len(parts) == 2:
+                    hour = int(parts[0].strip())
+                    minute = int(parts[1].strip())
+                    if 0 <= hour <= 23 and 0 <= minute <= 59:
+                        time_str = f"{hour:02d}:{minute:02d}"
+                        set_evening_time(chat_id, time_str)
+                        await finish_onboarding(update, context)
+                        return
+            raise ValueError("Invalid time format")
+        except (ValueError, IndexError):
+            await update.message.reply_text(
+                "Invalid time format. Please choose from the buttons or enter manually:",
+                reply_markup=build_evening_time_keyboard()
+            )
+            return
+    
+    if context.chat_data.get('onboard_stage') == 'ask_evening_time_manual':
+        # Пользователь вводит время вечерней сводки вручную
+        try:
+            if ':' in text:
+                parts = text.split(':')
+                if len(parts) == 2:
+                    hour = int(parts[0].strip())
+                    minute = int(parts[1].strip())
+                    if 0 <= hour <= 23 and 0 <= minute <= 59:
+                        time_str = f"{hour:02d}:{minute:02d}"
+                        set_evening_time(chat_id, time_str)
+                        await finish_onboarding(update, context)
+                        return
+            raise ValueError("Invalid time format")
+        except (ValueError, IndexError):
+            await update.message.reply_text(
+                "Invalid time format. Please enter time in HH:MM format (e.g., 21:00, 23:00):"
             )
             return
     
@@ -415,9 +731,8 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 context.chat_data.pop('onboard_stage', None)
                 track_event(chat_id, "google_auth_success")
                 
-                # Планируем утренний брифинг
-                tz = get_user_timezone(chat_id) or DEFAULT_TZ
-                schedule_morning_briefing(context.bot, chat_id, tz, MORNING_BRIEFING_HOUR, MORNING_BRIEFING_MINUTE)
+                # Планирование сводок теперь через cron job в scheduler
+                # Scheduler автоматически проверяет всех пользователей каждый час
                 
                 await update.message.reply_text(
                     "✅ Great! Your Google Calendar is connected.\n\n"
@@ -442,10 +757,20 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     # Обработка команд меню
     if text == "⚙️ Settings":
         tz = get_user_timezone(chat_id) or DEFAULT_TZ
+        morning_time = get_morning_time(chat_id)
+        evening_time = get_evening_time(chat_id)
+        user_name = get_user_name(chat_id)
+        
+        settings_text = f"⚙️ Settings\n\n"
+        if user_name:
+            settings_text += f"Name: {user_name}\n"
+        settings_text += f"Timezone: {tz}\n"
+        settings_text += f"Morning briefing: {morning_time}\n"
+        settings_text += f"Evening recap: {evening_time}\n\n"
+        settings_text += "To change settings, send /start to reset onboarding."
+        
         await update.message.reply_text(
-            f"⚙️ Settings\n\n"
-            f"Timezone: {tz}\n\n"
-            f"To change timezone, send /start to reset onboarding.",
+            settings_text,
             reply_markup=build_main_menu()
         )
         return
@@ -709,12 +1034,11 @@ def main():
     if not token:
         raise RuntimeError("Set BOT_TOKEN env variable")
     
-    # Запускаем scheduler
-    start_scheduler()
-    
     async def _post_init(app):
         await app.bot.delete_webhook(drop_pending_updates=True)
         await set_commands(app)
+        # Запускаем scheduler после инициализации бота
+        start_scheduler(app.bot)
     
     app: Application = (
         ApplicationBuilder()
