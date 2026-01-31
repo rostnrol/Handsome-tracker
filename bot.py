@@ -418,14 +418,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Шаг 1: Приветственное сообщение
     await update.message.reply_text(
-        "Hi! 👋 I am a task tracker you've been dreaming of\n"
+        "Hi!👋🏻\n\n"
+        "I am a task tracker you've been dreaming of\n"
         "With me you won't forget a thing\n\n"
-        "Every morning, I'll send you a briefing of your day\n"
-        "You can send me tasks in ANY format: Voice messages, Text, or even Photos of notes/schedules\n"
+        "Every morning, I'll send you a briefing of your day\n\n"
+        "You can send me tasks in any format:\n"
+        "• Voice messages\n"
+        "• Text\n"
+        "• or even Photos of notes/schedules\n\n"
         "I will instantly add them to your Google Calendar\n"
-        "During the day you can see your tasks in a little app here and mark the completed ones\n" 
-        "Every evening, I'll send you a brief summary of your day, and we'll reflect on what can be transferred to the next day, and what can be forgotten\n\n"
-        "Let's set you up! 🚀"
+        "During the day you can see your tasks in a little app here and mark the completed ones\n\n"
+        "Every evening, I'll send you a brief summary of your day, and we'll reflect on\n"
+        "• what can be transferred to the next day\n"
+        "• and what can be forgotten\n\n"
+        "Let's set you up✨"
     )
     
     # Шаг 2: Вопрос об имени
