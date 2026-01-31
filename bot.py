@@ -11,6 +11,8 @@ import tempfile
 import time as time_module
 from datetime import datetime
 from typing import Optional, Dict
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 import pytz
 
@@ -1059,6 +1061,30 @@ def main():
     app.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+    
+    # Запускаем HTTP сервер для Render (health check)
+    port = int(os.getenv("PORT", 8000))
+    
+    class HealthCheckHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"OK")
+        
+        def log_message(self, format, *args):
+            # Отключаем логирование HTTP запросов
+            pass
+    
+    def start_http_server():
+        """Запускает HTTP сервер на указанном порту в отдельном потоке"""
+        server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+        print(f"[HTTP Server] Started on port {port}")
+        server.serve_forever()
+    
+    # Запускаем HTTP сервер в отдельном потоке
+    http_thread = threading.Thread(target=start_http_server, daemon=True)
+    http_thread.start()
     
     while True:
         try:
