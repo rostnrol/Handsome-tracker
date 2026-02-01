@@ -64,7 +64,7 @@ def build_main_menu() -> ReplyKeyboardMarkup:
         [KeyboardButton("📅 Open Schedule", web_app=WebAppInfo(url=os.getenv("WEB_APP_URL", "https://example.com")))],
         [KeyboardButton("⚙️ Settings"), KeyboardButton("🆘 Support")]
     ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, persistent=True)
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
 
 
 def build_timezone_keyboard() -> ReplyKeyboardMarkup:
