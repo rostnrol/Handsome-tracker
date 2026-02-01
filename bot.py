@@ -11,8 +11,8 @@ import tempfile
 import time as time_module
 from datetime import datetime
 from typing import Optional, Dict
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import asyncio
+from aiohttp import web
 
 import pytz
 
@@ -352,7 +352,7 @@ def parse_utc_offset(text: str) -> Optional[str]:
     text = text.strip().upper()
     if not text.startswith("UTC"):
         return None
-    
+
     # Маппинг UTC offset к таймзонам
     tz_map = {
         "UTC-12": "Etc/GMT+12",
@@ -522,8 +522,15 @@ async def finish_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Завершение онбординга - подключение Google Calendar"""
     chat_id = update.effective_chat.id
     
-    # Кнопка подключения Google Calendar
-    auth_url = get_authorization_url(chat_id)
+    # Формируем redirect_uri для callback (используем тот же логику, что и в main())
+    base_url = os.getenv("BASE_URL")
+    if not base_url:
+        port = int(os.getenv("PORT", 8000))
+        base_url = f"http://localhost:{port}"
+    redirect_uri = f"{base_url}/google/callback"
+    
+    # Генерируем URL авторизации с chat_id в state
+    auth_url = get_authorization_url(chat_id, redirect_uri)
     
     keyboard = [[KeyboardButton("🔗 Connect Google Calendar")]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
@@ -535,12 +542,13 @@ async def finish_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{greeting}\n\n"
         "To get started, connect your Google Calendar:\n"
         f"{auth_url}\n\n"
-        "After authorization, send me the code you receive.",
+        "Click the link above to authorize. You'll be redirected back automatically.",
         reply_markup=reply_markup
     )
     
-    context.chat_data['onboard_stage'] = 'waiting_oauth'
-    context.chat_data['auth_url'] = auth_url
+    # Очищаем стадию онбординга, так как авторизация теперь происходит автоматически через callback
+    # Пользователь может отправлять сообщения, и они будут обрабатываться как обычные задачи
+    context.chat_data.pop('onboard_stage', None)
 
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -572,7 +580,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             context.chat_data['onboard_stage'] = 'timezone_manual'
             return
-        
+
         if text == "🌍 Choose from UTC List":
             await update.message.reply_text(
                 "Choose your UTC offset:",
@@ -580,14 +588,14 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             context.chat_data['onboard_stage'] = 'timezone_utc_list'
             return
-        
+
         # Если это не кнопка, значит пользователь ввел что-то другое
         await update.message.reply_text(
             "Please choose one of the options:",
             reply_markup=build_timezone_keyboard()
         )
         return
-    
+
     if context.chat_data.get('onboard_stage') == 'timezone_manual':
         # Пользователь вводит таймзону вручную
         try:
@@ -600,7 +608,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 "Invalid timezone. Please enter a valid timezone (e.g., Europe/London, America/New_York):"
             )
             return
-    
+
     if context.chat_data.get('onboard_stage') == 'timezone_utc_list':
         # Пользователь выбрал UTC из списка
         if text == "⬅️ Back":
@@ -629,7 +637,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             context.chat_data['onboard_stage'] = 'ask_morning_time_manual'
             return
-        
+
         # Проверяем, является ли это валидным временем
         try:
             if ':' in text:
@@ -649,7 +657,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 reply_markup=build_morning_time_keyboard()
             )
             return
-    
+
     if context.chat_data.get('onboard_stage') == 'ask_morning_time_manual':
         # Пользователь вводит время утренней сводки вручную
         try:
@@ -669,7 +677,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 "Invalid time format. Please enter time in HH:MM format (e.g., 09:00, 08:30):"
             )
             return
-    
+
     if context.chat_data.get('onboard_stage') == 'ask_evening_time':
         # Вопрос о времени вечерней сводки
         if text == "✏️ Enter Manually":
@@ -679,7 +687,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             context.chat_data['onboard_stage'] = 'ask_evening_time_manual'
             return
-        
+
         # Проверяем, является ли это валидным временем
         try:
             if ':' in text:
@@ -699,7 +707,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 reply_markup=build_evening_time_keyboard()
             )
             return
-    
+
     if context.chat_data.get('onboard_stage') == 'ask_evening_time_manual':
         # Пользователь вводит время вечерней сводки вручную
         try:
@@ -719,49 +727,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 "Invalid time format. Please enter time in HH:MM format (e.g., 21:00, 23:00):"
             )
             return
-    
-    if context.chat_data.get('onboard_stage') == 'waiting_oauth':
-        # Пользователь отправил OAuth код
-        if text == "🔗 Connect Google Calendar":
-            auth_url = context.chat_data.get('auth_url', get_authorization_url(chat_id))
-            await update.message.reply_text(
-                f"Click the link to authorize:\n{auth_url}\n\n"
-                "After authorization, send me the code you receive."
-            )
-            return
-        
-        # Пытаемся обменять код на токены
-        try:
-            tokens = exchange_code_for_tokens(text, chat_id)
-            if tokens:
-                save_google_tokens(chat_id, tokens)
-                set_onboarded(chat_id, True)
-                context.chat_data.pop('onboard_stage', None)
-                track_event(chat_id, "google_auth_success")
-                
-                # Планирование сводок теперь через cron job в scheduler
-                # Scheduler автоматически проверяет всех пользователей каждый час
-                
-                await update.message.reply_text(
-                    "✅ Great! Your Google Calendar is connected.\n\n"
-                    "Now you can send me tasks in any format and I'll add them to your calendar!",
-                    reply_markup=build_main_menu()
-                )
-                return
-            else:
-                await update.message.reply_text(
-                    "❌ Invalid authorization code. Please try again or use the button to get a new link."
-                )
-                track_event(chat_id, "google_auth_failed")
-                return
-        except Exception as e:
-            print(f"[Bot] Ошибка при обработке OAuth кода: {e}")
-            track_event(chat_id, "error", {"error_type": "oauth_code_processing", "error_message": str(e)[:100]})
-            await update.message.reply_text(
-                "An error occurred during authorization. Please try again."
-            )
-            return
-    
+
     # Обработка команд меню
     if text == "⚙️ Settings":
         tz = get_user_timezone(chat_id) or DEFAULT_TZ
@@ -782,7 +748,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             reply_markup=build_main_menu()
         )
         return
-    
+
     if text == "🆘 Support":
         await update.message.reply_text(
             "🆘 Support\n\n"
@@ -790,7 +756,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             reply_markup=build_main_menu()
         )
         return
-    
+
     # Обработка обычного текста как задачи
     if not is_onboarded(chat_id):
         await update.message.reply_text(
@@ -798,7 +764,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             reply_markup=ReplyKeyboardRemove()
         )
         return
-    
+
     await process_task(update, context, text=text, source="text")
 
 
@@ -806,7 +772,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
     """Обработчик голосовых сообщений"""
     if not update.message or not update.message.voice:
         return
-    
+
     chat_id = update.effective_chat.id
     
     if not is_onboarded(chat_id):
@@ -814,7 +780,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             "Please complete the setup first by sending /start"
         )
         return
-    
+
     # Трекинг события
     track_event(chat_id, "task_source_voice")
     
@@ -837,7 +803,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             track_event(chat_id, "error", {"error_type": "voice_transcription_failed"})
             return
-        
+
         # Обрабатываем транскрибированный текст
         await process_task(update, context, text=transcribed_text, source="voice")
     finally:
@@ -851,16 +817,16 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
 async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик фото"""
     if not update.message or not update.message.photo:
-        return
+                return
     
     chat_id = update.effective_chat.id
     
     if not is_onboarded(chat_id):
-        await update.message.reply_text(
+            await update.message.reply_text(
             "Please complete the setup first by sending /start"
-        )
-        return
-    
+            )
+            return
+
     # Трекинг события
     track_event(chat_id, "task_source_photo")
     
@@ -885,7 +851,7 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             track_event(chat_id, "error", {"error_type": "image_extraction_failed"})
             return
-        
+
         # Создаем событие в календаре
         await create_calendar_event(update, context, event_data, source="photo")
     finally:
@@ -943,7 +909,14 @@ async def create_calendar_event(update: Update, context: ContextTypes.DEFAULT_TY
     
     # Проверяем авторизацию
     if not has_google_auth(chat_id):
-        auth_url = get_authorization_url(chat_id)
+        # Формируем redirect_uri для callback (используем тот же логику, что и в finish_onboarding)
+        base_url = os.getenv("BASE_URL")
+        if not base_url:
+            port = int(os.getenv("PORT", 8000))
+            base_url = f"http://localhost:{port}"
+        redirect_uri = f"{base_url}/google/callback"
+        
+        auth_url = get_authorization_url(chat_id, redirect_uri)
         await update.message.reply_text(
             f"🔗 Please connect your Google Calendar first:\n{auth_url}",
             reply_markup=build_main_menu()
@@ -1009,7 +982,7 @@ async def set_commands(app: Application):
 
 def main():
     init_db()
-    
+
     # Singleton gates (Render etc.)
     holder = os.getenv("RENDER_INSTANCE_ID") or os.getenv("DYNO") or os.getenv("HOSTNAME") or "unknown"
     primary_env = os.getenv("PRIMARY_INSTANCE_ID")
@@ -1024,7 +997,7 @@ def main():
         if not (holder.endswith("0") or holder.endswith("a")):
             print(f"[singleton-env] Heuristic min holder not matched for {holder}: exiting.")
             return
-    
+
     con = get_con()
     try:
         cur = con.cursor()
@@ -1037,54 +1010,161 @@ def main():
             return
     finally:
         con.close()
-    
+
     token = os.getenv("BOT_TOKEN")
     if not token:
         raise RuntimeError("Set BOT_TOKEN env variable")
+
+    # Запускаем HTTP сервер для Render (health check и Google OAuth callback)
+    port = int(os.getenv("PORT", 8000))
+    base_url = os.getenv("BASE_URL")
+    if not base_url:
+        base_url = f"http://localhost:{port}"
+    
+    async def health_check(request):
+        """Health check endpoint для Render"""
+        return web.Response(text="OK")
+    
+    async def google_callback(request):
+        """Обработчик Google OAuth callback"""
+        state = None
+        chat_id = None
+        try:
+            # Получаем code и state из query parameters
+            code = request.query.get('code')
+            state = request.query.get('state')  # Это chat_id
+            
+            if not code or not state:
+                return web.Response(
+                    text="Error: Missing code or state parameter",
+                    status=400
+                )
+            
+            chat_id = int(state)
+            redirect_uri = f"{base_url}/google/callback"
+            
+            # Обмениваем код на токены
+            tokens = exchange_code_for_tokens(code, redirect_uri)
+            
+            if tokens:
+                # Сохраняем токены в БД
+                save_google_tokens(chat_id, tokens)
+                set_onboarded(chat_id, True)
+                
+                # Отправляем уведомление пользователю в Telegram
+                try:
+                    await app.bot.send_message(
+                        chat_id=chat_id,
+                        text="✅ Great! Your Google Calendar is connected.\n\n"
+                             "Now you can send me tasks in any format and I'll add them to your calendar!",
+                        reply_markup=build_main_menu()
+                    )
+                    track_event(chat_id, "google_auth_success")
+                except Exception as e:
+                    print(f"[Bot] Ошибка при отправке сообщения пользователю {chat_id}: {e}")
+                
+                # Возвращаем HTML страницу
+                html_response = """
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>Authorization Successful</title>
+                    <meta charset="UTF-8">
+                    <style>
+                        body {
+                            font-family: Arial, sans-serif;
+                            display: flex;
+                            justify-content: center;
+                            align-items: center;
+                            height: 100vh;
+                            margin: 0;
+                            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                        }
+                        .container {
+                            background: white;
+                            padding: 40px;
+                            border-radius: 10px;
+                            box-shadow: 0 10px 25px rgba(0,0,0,0.2);
+                            text-align: center;
+                        }
+                        h1 {
+                            color: #4CAF50;
+                            margin-bottom: 20px;
+                        }
+                        p {
+                            color: #666;
+                            font-size: 16px;
+                        }
+                    </style>
+                </head>
+                <body>
+                    <div class="container">
+                        <h1>✅ Authorization Successful!</h1>
+                        <p>You can close this window and return to the bot.</p>
+                    </div>
+                </body>
+                </html>
+                """
+                return web.Response(text=html_response, content_type='text/html')
+            else:
+                if chat_id:
+                    track_event(chat_id, "google_auth_failed")
+                return web.Response(
+                    text="Error: Failed to exchange authorization code for tokens",
+                    status=500
+                )
+        except Exception as e:
+            print(f"[Bot] Ошибка при обработке Google callback: {e}")
+            # Используем chat_id если он был определен, иначе 0
+            error_chat_id = chat_id if chat_id else (int(state) if state and state.isdigit() else 0)
+            track_event(error_chat_id, "error", {
+                "error_type": "oauth_callback_processing",
+                "error_message": str(e)[:100]
+            })
+            return web.Response(
+                text=f"Error: {str(e)}",
+                status=500
+            )
+    
+    # Создаем aiohttp приложение
+    http_app = web.Application()
+    http_app.router.add_get("/", health_check)
+    http_app.router.add_get("/health", health_check)
+    http_app.router.add_get("/google/callback", google_callback)
+    
+    # Запускаем HTTP сервер в фоне
+    async def start_http_server():
+        """Запускает HTTP сервер на указанном порту"""
+        runner = web.AppRunner(http_app)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", port)
+        await site.start()
+        print(f"[HTTP Server] Started on port {port}")
+        print(f"[HTTP Server] Callback URL: {base_url}/google/callback")
     
     async def _post_init(app):
         await app.bot.delete_webhook(drop_pending_updates=True)
         await set_commands(app)
         # Запускаем scheduler после инициализации бота
         start_scheduler(app.bot)
+        # Запускаем HTTP сервер в фоне через asyncio
+        loop = asyncio.get_event_loop()
+        loop.create_task(start_http_server())
     
+    # Создаем bot application с правильной регистрацией post_init
     app: Application = (
         ApplicationBuilder()
         .token(token)
         .post_init(_post_init)
         .build()
     )
-    
+
     # Регистрируем хендлеры
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.LOCATION, location_handler))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
-    
-    # Запускаем HTTP сервер для Render (health check)
-    port = int(os.getenv("PORT", 8000))
-    
-    class HealthCheckHandler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.send_header("Content-type", "text/plain")
-            self.end_headers()
-            self.wfile.write(b"OK")
-        
-        def log_message(self, format, *args):
-            # Отключаем логирование HTTP запросов
-            pass
-    
-    def start_http_server():
-        """Запускает HTTP сервер на указанном порту в отдельном потоке"""
-        server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-        print(f"[HTTP Server] Started on port {port}")
-        server.serve_forever()
-    
-    # Запускаем HTTP сервер в отдельном потоке
-    http_thread = threading.Thread(target=start_http_server, daemon=True)
-    http_thread.start()
     
     while True:
         try:

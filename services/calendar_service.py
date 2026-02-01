@@ -16,15 +16,16 @@ from googleapiclient.errors import HttpError
 
 # Конфигурация OAuth2
 SCOPES = ['https://www.googleapis.com/auth/calendar.events']
-REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "urn:ietf:wg:oauth:2.0:oob")  # Для десктопных приложений
+# REDIRECT_URI теперь формируется динамически на основе базового URL сервера
 
 
-def get_authorization_url(user_id: int) -> str:
+def get_authorization_url(user_id: int, redirect_uri: str) -> str:
     """
     Генерирует URL для авторизации пользователя в Google Calendar.
     
     Args:
         user_id: ID пользователя Telegram
+        redirect_uri: URL для callback (например, https://your-domain.com/google/callback)
     
     Returns:
         URL для авторизации
@@ -34,7 +35,7 @@ def get_authorization_url(user_id: int) -> str:
     
     if not client_id or not client_secret:
         # Возвращаем заглушку для тестирования
-        return "https://accounts.google.com/o/oauth2/auth?client_id=SETUP_REQUIRED&redirect_uri=urn:ietf:wg:oauth:2.0:oob&scope=https://www.googleapis.com/auth/calendar.events&response_type=code"
+        return f"https://accounts.google.com/o/oauth2/auth?client_id=SETUP_REQUIRED&redirect_uri={redirect_uri}&scope=https://www.googleapis.com/auth/calendar.events&response_type=code&state={user_id}"
     
     # Создаем flow для OAuth2
     flow = Flow.from_client_config(
@@ -44,11 +45,11 @@ def get_authorization_url(user_id: int) -> str:
                 "client_secret": client_secret,
                 "auth_uri": "https://accounts.google.com/o/oauth2/auth",
                 "token_uri": "https://oauth2.googleapis.com/token",
-                "redirect_uris": [REDIRECT_URI]
+                "redirect_uris": [redirect_uri]
             }
         },
         scopes=SCOPES,
-        redirect_uri=REDIRECT_URI
+        redirect_uri=redirect_uri
     )
     
     # Генерируем URL авторизации
@@ -61,13 +62,13 @@ def get_authorization_url(user_id: int) -> str:
     return authorization_url
 
 
-def exchange_code_for_tokens(auth_code: str, user_id: int) -> Optional[Dict[str, str]]:
+def exchange_code_for_tokens(auth_code: str, redirect_uri: str) -> Optional[Dict[str, str]]:
     """
     Обменивает authorization code на access_token и refresh_token.
     
     Args:
         auth_code: Код авторизации от Google
-        user_id: ID пользователя Telegram (для проверки state)
+        redirect_uri: URL для callback (должен совпадать с тем, что использовался при генерации URL)
     
     Returns:
         Словарь с токенами: {"access_token": "...", "refresh_token": "...", "token_uri": "...", "client_id": "...", "client_secret": "..."}
@@ -87,11 +88,11 @@ def exchange_code_for_tokens(auth_code: str, user_id: int) -> Optional[Dict[str,
                     "client_secret": client_secret,
                     "auth_uri": "https://accounts.google.com/o/oauth2/auth",
                     "token_uri": "https://oauth2.googleapis.com/token",
-                    "redirect_uris": [REDIRECT_URI]
+                    "redirect_uris": [redirect_uri]
                 }
             },
             scopes=SCOPES,
-            redirect_uri=REDIRECT_URI
+            redirect_uri=redirect_uri
         )
         
         # Обмениваем код на токены

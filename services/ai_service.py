@@ -276,3 +276,56 @@ async def generate_morning_briefing(events: list, user_timezone: str) -> str:
         print(f"[AI Service] Ошибка при генерации брифинга: {e}")
         # Fallback к простому формату
         return f"Good morning! You have {len(events)} event(s) scheduled for today:\n{events_text}"
+
+
+async def generate_text_response(input_text: str, model: str = "gpt-4o-mini") -> Optional[str]:
+    """
+    Генерирует текстовый ответ на основе входного текста через OpenAI API.
+    Используется для различных задач генерации текста (истории, сводки и т.д.).
+    
+    Args:
+        input_text: Входной текст для генерации ответа
+        model: Модель OpenAI для использования (по умолчанию "gpt-4o-mini")
+               Если указана "gpt-5-nano" и она недоступна, будет использована "gpt-4o-mini"
+    
+    Returns:
+        Сгенерированный текст или None в случае ошибки
+    """
+    if not client:
+        print("[AI Service] OPENAI_API_KEY не установлен")
+        return None
+    
+    # Пытаемся использовать запрошенную модель, если она недоступна - fallback на gpt-4o-mini
+    try:
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": input_text
+                }
+            ],
+            temperature=0.7
+        )
+        
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"[AI Service] Ошибка при генерации текста с моделью {model}: {e}")
+        # Если ошибка связана с моделью и это не gpt-4o-mini, пробуем fallback
+        if model != "gpt-4o-mini":
+            try:
+                print(f"[AI Service] Пробуем fallback на gpt-4o-mini")
+                response = await client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": input_text
+                        }
+                    ],
+                    temperature=0.7
+                )
+                return response.choices[0].message.content.strip()
+            except Exception as e2:
+                print(f"[AI Service] Ошибка при использовании fallback модели: {e2}")
+        return None
