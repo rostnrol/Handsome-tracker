@@ -16,12 +16,13 @@ from aiohttp import web
 
 import pytz
 
-from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, BotCommand, WebAppInfo
+from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, BotCommand, WebAppInfo, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
@@ -33,8 +34,11 @@ from services.calendar_service import (
     get_authorization_url,
     exchange_code_for_tokens,
     get_credentials_from_stored,
-    create_event
+    create_event,
+    mark_event_done,
+    reschedule_event
 )
+from services.scheduler_service import get_today_events
 from services.analytics_service import track_event
 from services.scheduler_service import start_scheduler
 from services.db_service import get_google_tokens
@@ -903,6 +907,171 @@ async def process_task(update: Update, context: ContextTypes.DEFAULT_TYPE, text:
         )
 
 
+async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик нажатий на inline-кнопки"""
+    query = update.callback_query
+    await query.answer()
+    
+    chat_id = query.message.chat_id
+    callback_data = query.data
+    
+    # Проверяем авторизацию Google Calendar
+    stored_tokens = get_google_tokens(chat_id)
+    if not stored_tokens:
+        await query.edit_message_text(
+            "❌ Please connect your Google Calendar first using /start"
+        )
+        return
+    
+    credentials = get_credentials_from_stored(chat_id, stored_tokens)
+    if not credentials:
+        await query.edit_message_text(
+            "❌ Authorization error. Please reconnect your Google Calendar using /start"
+        )
+        return
+    
+    # Обработка отметки задачи как выполненной
+    if callback_data.startswith("done_"):
+        event_id = callback_data[5:]  # Убираем префикс "done_"
+        
+        try:
+            # Получаем событие для получения текущего заголовка
+            from googleapiclient.discovery import build
+            service = build('calendar', 'v3', credentials=credentials)
+            event = service.events().get(calendarId='primary', eventId=event_id).execute()
+            event_title = event.get('summary', 'Task')
+            
+            # Убираем "✅ " если уже есть
+            if event_title.startswith('✅ '):
+                event_title = event_title[2:]
+            
+            # Отмечаем как выполненное
+            success = mark_event_done(credentials, event_id, event_title)
+            
+            if success:
+                # Обновляем сообщение: меняем кнопку на "✅ {summary}" без callback_data
+                # Получаем текущую клавиатуру
+                inline_keyboard = query.message.reply_markup.inline_keyboard if query.message.reply_markup else []
+                
+                # Создаем новую клавиатуру, удаляя нажатую кнопку (или заменяя её на текст в сообщении)
+                new_keyboard = []
+                for row in inline_keyboard:
+                    new_row = []
+                    for button in row:
+                        if button.callback_data == callback_data:
+                            # Пропускаем эту кнопку - она уже выполнена, не добавляем её в новую клавиатуру
+                            continue
+                        else:
+                            new_row.append(button)
+                    if new_row:
+                        new_keyboard.append(new_row)
+                
+                new_markup = InlineKeyboardMarkup(new_keyboard) if new_keyboard else None
+                
+                await query.edit_message_reply_markup(reply_markup=new_markup)
+                track_event(chat_id, "task_marked_done", {"event_id": event_id})
+            else:
+                await query.answer("❌ Failed to mark task as done. Please try again.", show_alert=True)
+                
+        except Exception as e:
+            print(f"[Bot] Ошибка при отметке задачи как выполненной: {e}")
+            await query.answer("❌ An error occurred. Please try again.", show_alert=True)
+            track_event(chat_id, "error", {"error_type": "mark_task_done", "error_message": str(e)[:100]})
+    
+    # Обработка переноса всех задач на завтра
+    elif callback_data == "reschedule_all":
+        try:
+            from datetime import timedelta
+            from services.db_service import get_user_timezone
+            
+            user_timezone = get_user_timezone(chat_id) or "UTC"
+            tz = pytz.timezone(user_timezone)
+            now_local = datetime.now(tz)
+            
+            # Получаем события на сегодня
+            events = get_today_events(credentials, user_timezone)
+            
+            # Фильтруем невыполненные (без "✅")
+            incomplete_events = [e for e in events if not e.get('summary', '').startswith('✅ ')]
+            
+            if not incomplete_events:
+                await query.answer("✅ All tasks are already completed!", show_alert=True)
+                return
+            
+            # Переносим каждое событие на завтра
+            from googleapiclient.discovery import build
+            service = build('calendar', 'v3', credentials=credentials)
+            
+            rescheduled_count = 0
+            tomorrow = now_local + timedelta(days=1)
+            
+            for event in incomplete_events:
+                event_id = event.get('id')
+                if not event_id:
+                    continue
+                
+                try:
+                    # Получаем событие
+                    calendar_event = service.events().get(calendarId='primary', eventId=event_id).execute()
+                    
+                    # Парсим текущее время начала
+                    start_str = calendar_event['start'].get('dateTime', calendar_event['start'].get('date'))
+                    if 'T' in start_str:
+                        start_dt = datetime.fromisoformat(start_str.replace('Z', '+00:00'))
+                        if start_dt.tzinfo is None:
+                            start_dt = pytz.utc.localize(start_dt)
+                    else:
+                        # Если это событие на весь день, используем 09:00
+                        start_dt = tomorrow.replace(hour=9, minute=0, second=0, microsecond=0)
+                        start_dt = tz.localize(start_dt) if start_dt.tzinfo is None else start_dt
+                    
+                    # Вычисляем длительность
+                    end_str = calendar_event['end'].get('dateTime', calendar_event['end'].get('date'))
+                    if 'T' in end_str:
+                        end_dt = datetime.fromisoformat(end_str.replace('Z', '+00:00'))
+                        if end_dt.tzinfo is None:
+                            end_dt = pytz.utc.localize(end_dt)
+                        duration = end_dt - start_dt
+                    else:
+                        duration = timedelta(hours=1)  # По умолчанию 1 час
+                    
+                    # Переносим на завтра на то же время (или на утро, если время прошло)
+                    new_start = start_dt + timedelta(days=1)
+                    if new_start < now_local:
+                        # Если время уже прошло, ставим на утро завтра
+                        new_start = tomorrow.replace(hour=9, minute=0, second=0, microsecond=0)
+                        new_start = tz.localize(new_start) if new_start.tzinfo is None else new_start
+                    
+                    new_end = new_start + duration
+                    
+                    # Конвертируем в UTC для API
+                    new_start_utc = new_start.astimezone(pytz.utc)
+                    new_end_utc = new_end.astimezone(pytz.utc)
+                    
+                    # Переносим событие
+                    success = reschedule_event(credentials, event_id, new_start_utc, new_end_utc)
+                    if success:
+                        rescheduled_count += 1
+                        
+                except Exception as e:
+                    print(f"[Bot] Ошибка при переносе события {event_id}: {e}")
+                    continue
+            
+            if rescheduled_count > 0:
+                await query.edit_message_text(
+                    f"✅ Successfully rescheduled {rescheduled_count} task(s) to tomorrow!\n\n"
+                    f"{query.message.text}"
+                )
+                track_event(chat_id, "tasks_rescheduled", {"count": rescheduled_count})
+            else:
+                await query.answer("❌ Failed to reschedule tasks. Please try again.", show_alert=True)
+                
+        except Exception as e:
+            print(f"[Bot] Ошибка при переносе задач на завтра: {e}")
+            await query.answer("❌ An error occurred. Please try again.", show_alert=True)
+            track_event(chat_id, "error", {"error_type": "reschedule_tasks", "error_message": str(e)[:100]})
+
+
 async def create_calendar_event(update: Update, context: ContextTypes.DEFAULT_TYPE, event_data: Dict, source: str):
     """Создает событие в Google Calendar"""
     chat_id = update.effective_chat.id
@@ -1020,6 +1189,13 @@ def main():
     base_url = os.getenv("BASE_URL")
     if not base_url:
         base_url = f"http://localhost:{port}"
+    
+    # Создаем bot application ПЕРЕД определением google_callback, чтобы он был доступен в замыкании
+    app: Application = (
+        ApplicationBuilder()
+        .token(token)
+        .build()
+    )
     
     async def health_check(request):
         """Health check endpoint для Render"""
@@ -1142,22 +1318,17 @@ def main():
         print(f"[HTTP Server] Started on port {port}")
         print(f"[HTTP Server] Callback URL: {base_url}/google/callback")
     
-    async def _post_init(app):
-        await app.bot.delete_webhook(drop_pending_updates=True)
-        await set_commands(app)
+    async def _post_init(app_instance):
+        await app_instance.bot.delete_webhook(drop_pending_updates=True)
+        await set_commands(app_instance)
         # Запускаем scheduler после инициализации бота
-        start_scheduler(app.bot)
+        start_scheduler(app_instance.bot)
         # Запускаем HTTP сервер в фоне через asyncio
         loop = asyncio.get_event_loop()
         loop.create_task(start_http_server())
     
-    # Создаем bot application с правильной регистрацией post_init
-    app: Application = (
-        ApplicationBuilder()
-        .token(token)
-        .post_init(_post_init)
-        .build()
-    )
+    # Регистрируем post_init callback
+    app.post_init = _post_init
 
     # Регистрируем хендлеры
     app.add_handler(CommandHandler("start", start))
@@ -1165,6 +1336,7 @@ def main():
     app.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+    app.add_handler(CallbackQueryHandler(handle_callback_query))
     
     while True:
         try:

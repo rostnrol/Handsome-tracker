@@ -194,3 +194,93 @@ def create_event(credentials: Credentials, event_data: Dict[str, str]) -> Option
         print(f"[Calendar Service] Ошибка при создании события: {e}")
         return None
 
+
+def mark_event_done(credentials: Credentials, event_id: str, event_title: str) -> bool:
+    """
+    Отмечает событие как выполненное, добавляя эмодзи "✅ " в начало заголовка.
+    
+    Args:
+        credentials: Объект Credentials для доступа к API
+        event_id: ID события в Google Calendar
+        event_title: Текущий заголовок события
+    
+    Returns:
+        True если успешно, False в случае ошибки
+    """
+    try:
+        service = build('calendar', 'v3', credentials=credentials)
+        
+        # Получаем текущее событие
+        event = service.events().get(calendarId='primary', eventId=event_id).execute()
+        
+        # Проверяем, не отмечено ли уже событие как выполненное
+        if event.get('summary', '').startswith('✅ '):
+            # Уже выполнено
+            return True
+        
+        # Добавляем эмодзи в начало заголовка
+        new_summary = f"✅ {event_title}"
+        
+        # Обновляем событие
+        event['summary'] = new_summary
+        updated_event = service.events().update(
+            calendarId='primary',
+            eventId=event_id,
+            body=event
+        ).execute()
+        
+        return True
+        
+    except HttpError as e:
+        print(f"[Calendar Service] Ошибка HTTP при отметке события как выполненного: {e}")
+        return False
+    except Exception as e:
+        print(f"[Calendar Service] Ошибка при отметке события как выполненного: {e}")
+        return False
+
+
+def reschedule_event(credentials: Credentials, event_id: str, new_start_time: datetime, new_end_time: datetime) -> bool:
+    """
+    Переносит событие на новое время.
+    
+    Args:
+        credentials: Объект Credentials для доступа к API
+        event_id: ID события в Google Calendar
+        new_start_time: Новое время начала (datetime с timezone)
+        new_end_time: Новое время окончания (datetime с timezone)
+    
+    Returns:
+        True если успешно, False в случае ошибки
+    """
+    try:
+        service = build('calendar', 'v3', credentials=credentials)
+        
+        # Получаем текущее событие
+        event = service.events().get(calendarId='primary', eventId=event_id).execute()
+        
+        # Обновляем время
+        event['start'] = {
+            'dateTime': new_start_time.isoformat(),
+            'timeZone': 'UTC',
+        }
+        event['end'] = {
+            'dateTime': new_end_time.isoformat(),
+            'timeZone': 'UTC',
+        }
+        
+        # Обновляем событие
+        updated_event = service.events().update(
+            calendarId='primary',
+            eventId=event_id,
+            body=event
+        ).execute()
+        
+        return True
+        
+    except HttpError as e:
+        print(f"[Calendar Service] Ошибка HTTP при переносе события: {e}")
+        return False
+    except Exception as e:
+        print(f"[Calendar Service] Ошибка при переносе события: {e}")
+        return False
+

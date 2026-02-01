@@ -3,7 +3,7 @@ Scheduler Service для утренних и вечерних сводок че�
 Использует cron job, который запускается каждый час и проверяет всех пользователей
 """
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict
 import pytz
 
@@ -60,8 +60,10 @@ def get_today_events(credentials, user_timezone: str) -> List[Dict]:
             start = event['start'].get('dateTime', event['start'].get('date'))
             summary = event.get('summary', 'No title')
             description = event.get('description', '')
+            event_id = event.get('id', '')
             
             formatted_events.append({
+                'id': event_id,
                 'summary': summary,
                 'start_time': start,
                 'description': description
@@ -125,7 +127,7 @@ async def send_morning_briefing(bot, chat_id: int, user_timezone: str):
 
 async def send_evening_recap(bot, chat_id: int, user_timezone: str):
     """
-    Отправляет вечернюю сводку пользователю.
+    Отправляет вечернюю сводку пользователю с inline-кнопками для отметки задач.
     
     Args:
         bot: Telegram Bot instance
@@ -153,13 +155,36 @@ async def send_evening_recap(bot, chat_id: int, user_timezone: str):
         # Получаем события на сегодня
         events = get_today_events(credentials, user_timezone)
         
+        # Фильтруем выполненные (те, что начинаются с "✅")
+        completed_events = [e for e in events if e.get('summary', '').startswith('✅ ')]
+        incomplete_events = [e for e in events if not e.get('summary', '').startswith('✅ ')]
+        
         # Генерируем вечернюю сводку через AI
         recap = await generate_evening_recap(events, user_timezone)
         
-        # Отправляем сводку
+        # Создаем inline-клавиатуру для невыполненных задач
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        
+        keyboard = []
+        for event in incomplete_events:
+            summary = event.get('summary', 'Task')
+            event_id = event.get('id', '')
+            if event_id:
+                # Ограничиваем длину текста кнопки (Telegram лимит 64 символа)
+                button_text = f"⬜ {summary[:60]}" if len(summary) > 60 else f"⬜ {summary}"
+                keyboard.append([InlineKeyboardButton(button_text, callback_data=f"done_{event_id}")])
+        
+        # Добавляем кнопку для переноса всех задач на завтра
+        if incomplete_events:
+            keyboard.append([InlineKeyboardButton("➡️ Перенести остаток на завтра", callback_data="reschedule_all")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+        
+        # Отправляем сводку с кнопками
         await bot.send_message(
             chat_id=chat_id,
-            text=recap
+            text=recap,
+            reply_markup=reply_markup
         )
     except Exception as e:
         print(f"[Scheduler Service] Ошибка при отправке вечерней сводки: {e}")
