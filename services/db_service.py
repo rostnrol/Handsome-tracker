@@ -33,7 +33,7 @@ def get_google_tokens(user_id: int) -> Optional[Dict]:
             "client_secret": row[4],
             "scopes": json.loads(row[5]) if row[5] else []
         }
-        print(f"[DB Service] Получены токены для user_id={user_id}, refresh_token={'есть' if tokens.get('refresh_token') else 'отсутствует'}")
+        print(f"[DB Service] Получены токены для user_id={user_id}, refresh_token={'есть' if tokens.get('refresh_token') else 'отсутствует'}, client_secret={'есть' if tokens.get('client_secret') else 'отсутствует'}, client_id={'есть' if tokens.get('client_id') else 'отсутствует'}")
         return tokens
     print(f"[DB Service] Токены для user_id={user_id} не найдены в БД")
     return None
@@ -70,7 +70,7 @@ def save_google_tokens(user_id: int, tokens: Dict) -> None:
     )
     con.commit()
     con.close()
-    print(f"[DB Service] Токены сохранены для user_id={user_id}, refresh_token={'есть' if tokens.get('refresh_token') else 'отсутствует'}")
+    print(f"[DB Service] Токены сохранены для user_id={user_id}, refresh_token={'есть' if tokens.get('refresh_token') else 'отсутствует'}, client_secret={'есть' if tokens.get('client_secret') else 'отсутствует'}, client_id={'есть' if tokens.get('client_id') else 'отсутствует'}")
 
 
 def get_user_timezone(chat_id: int) -> Optional[str]:

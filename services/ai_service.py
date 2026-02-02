@@ -9,11 +9,24 @@ from datetime import datetime, timedelta
 import pytz
 
 from openai import AsyncOpenAI
+from openai import AuthenticationError, APIError
 
 
 # Инициализация клиента OpenAI
 _openai_key = os.getenv("OPENAI_API_KEY")
-client = AsyncOpenAI(api_key=_openai_key) if _openai_key else None
+# Проверяем, что ключ не пустой и имеет правильный формат (начинается с "sk-" или "sk-proj-")
+_openai_key_clean = _openai_key.strip() if _openai_key else None
+_is_valid_key = _openai_key_clean and (_openai_key_clean.startswith("sk-") or _openai_key_clean.startswith("sk-proj-"))
+client = AsyncOpenAI(api_key=_openai_key_clean) if _is_valid_key else None
+
+if _openai_key and not _is_valid_key:
+    print(f"[AI Service] ВНИМАНИЕ: OPENAI_API_KEY установлен, но имеет неверный формат")
+    print(f"[AI Service] Ключ должен начинаться с 'sk-' или 'sk-proj-'")
+    print(f"[AI Service] Первые 20 символов ключа: {_openai_key_clean[:20] if _openai_key_clean else 'N/A'}...")
+elif not _openai_key:
+    print(f"[AI Service] OPENAI_API_KEY не установлен, AI функции будут недоступны")
+elif _is_valid_key:
+    print(f"[AI Service] OPENAI_API_KEY успешно загружен (длина: {len(_openai_key_clean)} символов, начинается с '{_openai_key_clean[:10]}...')")
 
 
 async def transcribe_voice(file_path: str) -> Optional[str]:
@@ -36,6 +49,12 @@ async def transcribe_voice(file_path: str) -> Optional[str]:
                 file=audio_file
             )
             return transcript.text
+    except AuthenticationError as e:
+        print(f"[AI Service] Ошибка аутентификации OpenAI (Invalid API key): {e}")
+        return None
+    except APIError as e:
+        print(f"[AI Service] Ошибка API OpenAI: {e}")
+        return None
     except Exception as e:
         print(f"[AI Service] Ошибка при транскрибации голоса: {e}")
         return None
@@ -108,6 +127,12 @@ If multiple events are found, return all of them. If no events found, return emp
         elif isinstance(parsed, dict) and "summary" in parsed:
             return parsed
         
+        return None
+    except AuthenticationError as e:
+        print(f"[AI Service] Ошибка аутентификации OpenAI (Invalid API key) при обработке изображения: {e}")
+        return None
+    except APIError as e:
+        print(f"[AI Service] Ошибка API OpenAI при обработке изображения: {e}")
         return None
     except Exception as e:
         print(f"[AI Service] Ошибка при обработке изображения: {e}")
@@ -222,6 +247,12 @@ Return JSON with task information."""
         
         return parsed_data
         
+    except AuthenticationError as e:
+        print(f"[AI Service] Ошибка аутентификации OpenAI (Invalid API key) при парсинге текста: {e}")
+        return None
+    except APIError as e:
+        print(f"[AI Service] Ошибка API OpenAI при парсинге текста: {e}")
+        return None
     except json.JSONDecodeError as e:
         print(f"[AI Service] Ошибка парсинга JSON: {e}")
         print(f"[AI Service] Полученный контент: {content[:200]}")
@@ -272,6 +303,14 @@ async def generate_morning_briefing(events: list, user_timezone: str) -> str:
         )
         
         return response.choices[0].message.content.strip()
+    except AuthenticationError as e:
+        print(f"[AI Service] Ошибка аутентификации OpenAI (Invalid API key) при генерации брифинга: {e}")
+        # Fallback к простому формату
+        return f"Good morning! You have {len(events)} event(s) scheduled for today:\n{events_text}"
+    except APIError as e:
+        print(f"[AI Service] Ошибка API OpenAI при генерации брифинга: {e}")
+        # Fallback к простому формату
+        return f"Good morning! You have {len(events)} event(s) scheduled for today:\n{events_text}"
     except Exception as e:
         print(f"[AI Service] Ошибка при генерации брифинга: {e}")
         # Fallback к простому формату
@@ -309,6 +348,29 @@ async def generate_text_response(input_text: str, model: str = "gpt-4o-mini") ->
         )
         
         return response.choices[0].message.content.strip()
+    except AuthenticationError as e:
+        print(f"[AI Service] Ошибка аутентификации OpenAI (Invalid API key) при генерации текста с моделью {model}: {e}")
+        return None
+    except APIError as e:
+        print(f"[AI Service] Ошибка API OpenAI при генерации текста с моделью {model}: {e}")
+        # Если ошибка связана с моделью и это не gpt-4o-mini, пробуем fallback
+        if model != "gpt-4o-mini":
+            try:
+                print(f"[AI Service] Пробуем fallback на gpt-4o-mini")
+                response = await client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": input_text
+                        }
+                    ],
+                    temperature=0.7
+                )
+                return response.choices[0].message.content.strip()
+            except Exception as e2:
+                print(f"[AI Service] Ошибка при использовании fallback модели: {e2}")
+        return None
     except Exception as e:
         print(f"[AI Service] Ошибка при генерации текста с моделью {model}: {e}")
         # Если ошибка связана с моделью и это не gpt-4o-mini, пробуем fallback

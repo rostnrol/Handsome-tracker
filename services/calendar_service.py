@@ -107,16 +107,18 @@ def exchange_code_for_tokens(auth_code: str, redirect_uri: str) -> Optional[Dict
             print(f"[Calendar Service] ВНИМАНИЕ: refresh_token отсутствует в ответе от Google!")
             print(f"[Calendar Service] Это может произойти, если пользователь уже авторизовал приложение ранее.")
         
+        # ВАЖНО: credentials.client_secret может быть None, потому что Google не возвращает его в credentials
+        # Используем client_secret из переменных окружения, который нам нужен для refresh токена
         # Возвращаем данные для сохранения
         tokens_dict = {
             "token": credentials.token,
             "refresh_token": credentials.refresh_token,
-            "token_uri": credentials.token_uri,
-            "client_id": credentials.client_id,
-            "client_secret": credentials.client_secret,
+            "token_uri": credentials.token_uri or "https://oauth2.googleapis.com/token",
+            "client_id": credentials.client_id or client_id,
+            "client_secret": client_secret,  # Берем из env, а не из credentials!
             "scopes": credentials.scopes
         }
-        print(f"[Calendar Service] Токены успешно получены, refresh_token={'есть' if tokens_dict.get('refresh_token') else 'отсутствует'}")
+        print(f"[Calendar Service] Токены успешно получены, refresh_token={'есть' if tokens_dict.get('refresh_token') else 'отсутствует'}, client_secret={'есть' if tokens_dict.get('client_secret') else 'отсутствует'}")
         return tokens_dict
     except Exception as e:
         print(f"[Calendar Service] Ошибка при обмене кода на токены: {e}")
@@ -136,35 +138,68 @@ def get_credentials_from_stored(user_id: int, stored_tokens: Dict) -> Optional[C
         Объект Credentials или None
     """
     try:
+        # Проверяем наличие обязательных полей для refresh
+        refresh_token = stored_tokens.get("refresh_token")
+        client_secret = stored_tokens.get("client_secret")
+        client_id = stored_tokens.get("client_id")
+        token_uri = stored_tokens.get("token_uri", "https://oauth2.googleapis.com/token")
+        
+        # Если client_secret отсутствует в сохраненных токенах, берем из env (для старых записей)
+        if not client_secret:
+            client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
+            print(f"[Calendar Service] client_secret не найден в сохраненных токенах для user_id={user_id}, используем из env")
+        
+        if not client_id:
+            client_id = os.getenv("GOOGLE_CLIENT_ID")
+            print(f"[Calendar Service] client_id не найден в сохраненных токенах для user_id={user_id}, используем из env")
+        
+        # Проверяем наличие обязательных полей
+        if not refresh_token:
+            print(f"[Calendar Service] ОШИБКА: refresh_token отсутствует для user_id={user_id}")
+            return None
+        if not client_secret:
+            print(f"[Calendar Service] ОШИБКА: client_secret отсутствует для user_id={user_id}")
+            return None
+        if not client_id:
+            print(f"[Calendar Service] ОШИБКА: client_id отсутствует для user_id={user_id}")
+            return None
+        
         creds = Credentials(
             token=stored_tokens.get("token"),
-            refresh_token=stored_tokens.get("refresh_token"),
-            token_uri=stored_tokens.get("token_uri", "https://oauth2.googleapis.com/token"),
-            client_id=stored_tokens.get("client_id"),
-            client_secret=stored_tokens.get("client_secret"),
+            refresh_token=refresh_token,
+            token_uri=token_uri,
+            client_id=client_id,
+            client_secret=client_secret,
             scopes=stored_tokens.get("scopes", SCOPES)
         )
         
         # Обновляем токен если истек
         if creds.expired and creds.refresh_token:
             print(f"[Calendar Service] Токен истек для user_id={user_id}, обновляем...")
-            creds.refresh(Request())
-            
-            # Сохраняем обновленные токены обратно в БД
-            updated_tokens = {
-                "token": creds.token,
-                "refresh_token": creds.refresh_token,  # refresh_token обычно не меняется
-                "token_uri": creds.token_uri,
-                "client_id": creds.client_id,
-                "client_secret": creds.client_secret,
-                "scopes": list(creds.scopes) if creds.scopes else []
-            }
-            save_google_tokens(user_id, updated_tokens)
-            print(f"[Calendar Service] Токены обновлены и сохранены для user_id={user_id}")
+            try:
+                creds.refresh(Request())
+                
+                # Сохраняем обновленные токены обратно в БД
+                # ВАЖНО: сохраняем client_secret из stored_tokens, а не из creds (который может быть None)
+                updated_tokens = {
+                    "token": creds.token,
+                    "refresh_token": creds.refresh_token,  # refresh_token обычно не меняется
+                    "token_uri": creds.token_uri or token_uri,
+                    "client_id": creds.client_id or client_id,
+                    "client_secret": client_secret,  # Берем из stored_tokens/env, а не из creds!
+                    "scopes": list(creds.scopes) if creds.scopes else []
+                }
+                save_google_tokens(user_id, updated_tokens)
+                print(f"[Calendar Service] Токены обновлены и сохранены для user_id={user_id}")
+            except Exception as refresh_error:
+                print(f"[Calendar Service] Ошибка при обновлении токена для user_id={user_id}: {refresh_error}")
+                # Если не удалось обновить, все равно возвращаем credentials (может быть еще валидным)
         
         return creds
     except Exception as e:
         print(f"[Calendar Service] Ошибка при создании credentials для user_id={user_id}: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 
