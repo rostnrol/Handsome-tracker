@@ -1508,7 +1508,6 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     elif callback_data == "reschedule_leftovers":
         try:
             from datetime import timedelta
-            from services.db_service import get_user_timezone
             
             user_timezone = get_user_timezone(chat_id) or "UTC"
             tz = pytz.timezone(user_timezone)

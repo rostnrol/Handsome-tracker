@@ -226,13 +226,13 @@ Return JSON with task information."""
         except Exception as e:
             print(f"[AI Service] Модель {model} недоступна, используем gpt-4o-mini: {e}")
             model = "gpt-4o-mini"
+            # gpt-4o-mini поддерживает только temperature=1 (по умолчанию)
             response = await client.chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=0.3,
                 response_format={"type": "json_object"}
             )
         
