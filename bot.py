@@ -63,7 +63,7 @@ def build_main_menu() -> ReplyKeyboardMarkup:
     keyboard = [
         [KeyboardButton("📋 Tasks for Today")],
         [KeyboardButton("📅 Open Google Calendar")],
-        [KeyboardButton("⚙️ Settings"), KeyboardButton("🆘 Support")]
+        [KeyboardButton("⚙️ Settings")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
 
@@ -901,21 +901,13 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     
     if text == "📅 Open Google Calendar":
-        # Отправляем ссылку на Google Calendar
+        # Отправляем ссылку на Google Calendar сразу без дополнительного сообщения
         calendar_url = "https://calendar.google.com/calendar"
         keyboard = [[InlineKeyboardButton("📅 Open Google Calendar", url=calendar_url)]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(
-            "📅 Open your Google Calendar:",
+            "📅",
             reply_markup=reply_markup
-        )
-        return
-
-    if text == "🆘 Support":
-        await update.message.reply_text(
-            "🆘 Support\n\n"
-            "Need help? Contact support or check the documentation.",
-            reply_markup=build_main_menu()
         )
         return
 
@@ -1050,10 +1042,20 @@ async def process_task(update: Update, context: ContextTypes.DEFAULT_TYPE, text:
         # Проверяем, является ли это задачей
         if not ai_parsed.get("is_task", True):
             await update.message.reply_text(
-                "Я не понял, что это за задача. Попробуй сформулировать иначе (например: 'Встреча завтра в 3').",
+                "Я не понял, что это за задача. Попробуй сформулировать иначе (например: 'Встреча завтра в 3' или 'Купить молоко сегодня в 15:00').",
                 reply_markup=build_main_menu()
             )
             track_event(chat_id, "not_a_task", {"source": source})
+            return
+        
+        # Дополнительная проверка: если summary пустой или слишком короткий, это может быть не задача
+        summary = ai_parsed.get("summary", "").strip()
+        if not summary or len(summary) < 2:
+            await update.message.reply_text(
+                "Я не понял, что это за задача. Укажи конкретное действие или событие (например: 'Встреча завтра в 3' или 'Купить молоко сегодня в 15:00').",
+                reply_markup=build_main_menu()
+            )
+            track_event(chat_id, "not_a_task", {"source": source, "reason": "empty_summary"})
             return
         
         # Трекинг успешного парсинга
@@ -1105,7 +1107,7 @@ async def show_daily_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if not events:
             await update.message.reply_text(
-                "📅 **План на сегодня:**\n\n"
+                "📅 **Отметь то, что уже сделано:**\n\n"
                 "Нет запланированных задач на сегодня! 🎉",
                 reply_markup=build_main_menu(),
                 parse_mode='Markdown'
@@ -1117,7 +1119,7 @@ async def show_daily_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         incomplete_events = [e for e in events if not e.get('summary', '').startswith('✅ ')]
         
         # Формируем текст сообщения
-        message_text = "📅 **План на сегодня:**\n\n"
+        message_text = "📅 **Отметь то, что уже сделано:**\n\n"
         
         # Добавляем выполненные задачи
         if completed_events:
@@ -1126,7 +1128,21 @@ async def show_daily_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # Убираем "✅ " для отображения, так как уже есть в тексте
                 if summary.startswith('✅ '):
                     summary = summary[2:]
-                message_text += f"✅ {summary}\n"
+                # Добавляем время задачи
+                start_time = event.get('start_time', '')
+                time_str = ""
+                if start_time:
+                    try:
+                        # Парсим время и форматируем
+                        if 'T' in start_time:
+                            dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+                            # Форматируем только если есть timezone info и конвертация прошла успешно
+                            if dt.tzinfo:
+                                dt = dt.astimezone(pytz.timezone(user_timezone))
+                                time_str = f" {dt.strftime('%H:%M')}"
+                    except:
+                        pass
+                message_text += f"✅ {summary}{time_str}\n"
             message_text += "\n"
         
         # Если есть невыполненные задачи, добавляем их в клавиатуру
@@ -1135,8 +1151,24 @@ async def show_daily_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             summary = event.get('summary', 'Task')
             event_id = event.get('id', '')
             if event_id:
+                # Добавляем время к тексту кнопки
+                start_time = event.get('start_time', '')
+                time_str = ""
+                if start_time:
+                    try:
+                        # Парсим время и форматируем
+                        if 'T' in start_time:
+                            dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+                            # Форматируем только если есть timezone info и конвертация прошла успешно
+                            if dt.tzinfo:
+                                dt = dt.astimezone(pytz.timezone(user_timezone))
+                                time_str = f" {dt.strftime('%H:%M')}"
+                    except:
+                        pass
                 # Ограничиваем длину текста кнопки (Telegram лимит 64 символа)
-                button_text = summary[:60] if len(summary) > 60 else summary
+                button_text = f"{summary}{time_str}"
+                if len(button_text) > 60:
+                    button_text = f"{summary[:55]}{time_str}"
                 keyboard.append([InlineKeyboardButton(button_text, callback_data=f"done_{event_id}")])
         
         # Добавляем кнопку обновления
@@ -1167,13 +1199,15 @@ async def show_daily_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик нажатий на inline-кнопки"""
     query = update.callback_query
-    await query.answer()
+    # Не вызываем query.answer() здесь, чтобы убрать дублирование текста кнопки
+    # Будем вызывать его только там, где нужно показать уведомление
     
     chat_id = query.message.chat_id
     callback_data = query.data
     
     # Обработка настроек (не требуют авторизации Google Calendar)
     if callback_data == "set_name":
+        await query.answer("")  # Убираем дублирование текста кнопки
         await query.edit_message_text(
             "✏️ Enter your new name:",
             reply_markup=None
@@ -1182,6 +1216,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         return
     
     elif callback_data == "set_tz":
+        await query.answer("")  # Убираем дублирование текста кнопки
         await query.edit_message_text(
             "🌍 Share your location or enter timezone manually:",
             reply_markup=build_timezone_keyboard()
@@ -1190,6 +1225,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         return
     
     elif callback_data == "set_morning":
+        await query.answer("")  # Убираем дублирование текста кнопки
         await query.edit_message_text(
             "🌅 At what time do you want to receive your Daily Plan?\n\n"
             "Send time in HH:MM format (e.g., 09:00):",
@@ -1199,6 +1235,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         return
     
     elif callback_data == "set_evening":
+        await query.answer("")  # Убираем дублирование текста кнопки
         await query.edit_message_text(
             "🌙 When should I send you the Evening Recap?\n\n"
             "Send time in HH:MM format (e.g., 21:00):",
@@ -1208,6 +1245,17 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         return
     
     # Для остальных callback нужна авторизация Google Calendar
+    # НЕ вызываем query.answer() здесь для callback, которые сами вызывают его позже:
+    # - "done_*" и "already_done_*" - вызывают query.answer() в конце обработки
+    # - "refresh_today" - вызывает query.answer() после обновления списка
+    # - "reschedule_leftovers" - вызывает query.answer() после переноса задач
+    # Вызываем только для других callback, которые не обрабатываются дальше
+    if (not callback_data.startswith("done_") and 
+        callback_data != "already_done_" and 
+        callback_data != "refresh_today" and 
+        callback_data != "reschedule_leftovers"):
+        await query.answer("")  # Убираем дублирование текста кнопки для других callback
+    
     stored_tokens = get_google_tokens(chat_id)
     if not stored_tokens:
         await query.edit_message_text(
@@ -1234,7 +1282,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             
             if not events:
                 await query.edit_message_text(
-                    "📅 **План на сегодня:**\n\n"
+                    "📅 **Отметь то, что уже сделано:**\n\n"
                     "Нет запланированных задач на сегодня! 🎉",
                     reply_markup=None,  # Явно очищаем клавиатуру
                     parse_mode='Markdown'
@@ -1247,7 +1295,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             incomplete_events = [e for e in events if not e.get('summary', '').startswith('✅ ')]
             
             # Формируем текст сообщения
-            message_text = "📅 **План на сегодня:**\n\n"
+            message_text = "📅 **Отметь то, что уже сделано:**\n\n"
             
             # Добавляем выполненные задачи
             if completed_events:
@@ -1255,7 +1303,20 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                     summary = event.get('summary', 'Task')
                     if summary.startswith('✅ '):
                         summary = summary[2:]
-                    message_text += f"✅ {summary}\n"
+                    # Добавляем время задачи
+                    start_time = event.get('start_time', '')
+                    time_str = ""
+                    if start_time:
+                        try:
+                            if 'T' in start_time:
+                                dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+                                # Форматируем только если есть timezone info и конвертация прошла успешно
+                                if dt.tzinfo:
+                                    dt = dt.astimezone(pytz.timezone(user_timezone))
+                                    time_str = f" {dt.strftime('%H:%M')}"
+                        except:
+                            pass
+                    message_text += f"✅ {summary}{time_str}\n"
                 message_text += "\n"
             
             # Создаем клавиатуру для невыполненных задач
@@ -1264,7 +1325,22 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 summary = event.get('summary', 'Task')
                 event_id = event.get('id', '')
                 if event_id:
-                    button_text = summary[:60] if len(summary) > 60 else summary
+                    # Добавляем время к тексту кнопки
+                    start_time = event.get('start_time', '')
+                    time_str = ""
+                    if start_time:
+                        try:
+                            if 'T' in start_time:
+                                dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+                                # Форматируем только если есть timezone info и конвертация прошла успешно
+                                if dt.tzinfo:
+                                    dt = dt.astimezone(pytz.timezone(user_timezone))
+                                    time_str = f" {dt.strftime('%H:%M')}"
+                        except:
+                            pass
+                    button_text = f"{summary}{time_str}"
+                    if len(button_text) > 60:
+                        button_text = f"{summary[:55]}{time_str}"
                     keyboard.append([InlineKeyboardButton(button_text, callback_data=f"done_{event_id}")])
             
             # Добавляем кнопку обновления
@@ -1313,9 +1389,9 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             success = mark_event_done(credentials, event_id, event_title)
             
             if success:
-                # Проверяем, является ли это сообщение со списком задач (содержит "План на сегодня")
+                # Проверяем, является ли это сообщение со списком задач
                 message_text = query.message.text or ""
-                is_tasks_list = "План на сегодня" in message_text or "Tasks for Today" in message_text
+                is_tasks_list = "Отметь то, что уже сделано" in message_text or "Tasks for Today" in message_text or "План на сегодня" in message_text
                 
                 if is_tasks_list:
                     # Если это список задач, обновляем весь список
@@ -1327,7 +1403,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                     incomplete_events = [e for e in events if not e.get('summary', '').startswith('✅ ')]
                     
                     # Формируем новый текст сообщения
-                    new_message_text = "📅 **План на сегодня:**\n\n"
+                    new_message_text = "📅 **Отметь то, что уже сделано:**\n\n"
                     
                     # Добавляем выполненные задачи
                     if completed_events:
@@ -1335,7 +1411,20 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                             summary = event.get('summary', 'Task')
                             if summary.startswith('✅ '):
                                 summary = summary[2:]
-                            new_message_text += f"✅ {summary}\n"
+                            # Добавляем время задачи
+                            start_time = event.get('start_time', '')
+                            time_str = ""
+                            if start_time:
+                                try:
+                                    if 'T' in start_time:
+                                        dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+                                        # Форматируем только если есть timezone info и конвертация прошла успешно
+                                        if dt.tzinfo:
+                                            dt = dt.astimezone(pytz.timezone(user_timezone))
+                                            time_str = f" {dt.strftime('%H:%M')}"
+                                except:
+                                    pass
+                            new_message_text += f"✅ {summary}{time_str}\n"
                         new_message_text += "\n"
                     
                     # Создаем новую клавиатуру для невыполненных задач
@@ -1344,7 +1433,22 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                         summary = event.get('summary', 'Task')
                         event_id_item = event.get('id', '')
                         if event_id_item:
-                            button_text = summary[:60] if len(summary) > 60 else summary
+                            # Добавляем время к тексту кнопки
+                            start_time = event.get('start_time', '')
+                            time_str = ""
+                            if start_time:
+                                try:
+                                    if 'T' in start_time:
+                                        dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+                                        # Форматируем только если есть timezone info и конвертация прошла успешно
+                                        if dt.tzinfo:
+                                            dt = dt.astimezone(pytz.timezone(user_timezone))
+                                            time_str = f" {dt.strftime('%H:%M')}"
+                                except:
+                                    pass
+                            button_text = f"{summary}{time_str}"
+                            if len(button_text) > 60:
+                                button_text = f"{summary[:55]}{time_str}"
                             new_keyboard.append([InlineKeyboardButton(button_text, callback_data=f"done_{event_id_item}")])
                     
                     # Добавляем кнопку обновления
@@ -1385,6 +1489,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                     new_markup = InlineKeyboardMarkup(new_keyboard) if new_keyboard else None
                     await query.edit_message_reply_markup(reply_markup=new_markup)
                 
+                # Показываем визуальную обратную связь (вызываем только один раз)
                 await query.answer("✅ Задача отмечена как выполненная!")
                 track_event(chat_id, "task_marked_done", {"event_id": event_id})
             else:

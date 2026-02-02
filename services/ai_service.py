@@ -44,11 +44,19 @@ async def transcribe_voice(file_path: str) -> Optional[str]:
         return None
     try:
         with open(file_path, "rb") as audio_file:
+            # Используем whisper-1 с улучшенными параметрами для лучшего распознавания
+            # language=None позволяет автоматически определить язык
+            # prompt помогает модели лучше распознавать время и числа
             transcript = await client.audio.transcriptions.create(
                 model="whisper-1",
-                file=audio_file
+                file=audio_file,
+                language=None,  # Автоопределение языка
+                prompt="This is a task or event description. Numbers, times, and dates are important. Please transcribe them accurately, including times like 3 PM, 15:00, three o'clock, etc.",
+                response_format="text",
+                temperature=0.0  # Более детерминированный результат для лучшего распознавания чисел
             )
-            return transcript.text
+            # Если response_format="text", transcript уже строка
+            return transcript if isinstance(transcript, str) else transcript.text
     except AuthenticationError as e:
         print(f"[AI Service] Ошибка аутентификации OpenAI (Invalid API key): {e}")
         return None
@@ -176,11 +184,11 @@ JSON structure:
 }
 
 CRITICAL RULES:
-1. If the message does NOT look like a task (e.g., "Hello", "How are you", "Thanks", greetings, casual conversation), set "is_task": false and return minimal valid JSON.
+1. If the message does NOT look like a task (e.g., "Hello", "How are you", "Thanks", greetings, casual conversation, random words, questions without action), set "is_task": false and return minimal valid JSON.
 2. If "is_task": false, you can set summary to empty string, but still provide valid ISO times (use tomorrow 09:00 as default).
 3. If user did NOT specify time explicitly (e.g., "Buy milk", "Call John"), set the task to TOMORROW at 09:00 (default morning slot).
 4. If user specified only date without time, use 09:00 as start time and 09:30 as end time.
-5. If user specified only time without date, use TODAY (or tomorrow if time has passed).
+5. If user specified only time without date (e.g., "Meeting at 15:00"), use TODAY if that time has NOT passed yet, otherwise use TOMORROW.
 6. If time is in the past, move to tomorrow.
 7. All times must be in UTC (convert from user timezone).
 8. Default duration is 30 minutes (end_time = start_time + 30 minutes).
@@ -188,6 +196,7 @@ CRITICAL RULES:
 10. description can be empty string if no additional details.
 11. location can be empty string if not mentioned.
 12. If input text is in Russian, keep summary and description in Russian. Otherwise use English.
+13. Be VERY strict: if the message is unclear, ambiguous, or doesn't contain a clear action/task, set "is_task": false.
 
 IMPORTANT: Return ONLY valid JSON, no markdown formatting, no backticks, no additional text."""
 
@@ -260,20 +269,31 @@ Return JSON with task information."""
             start_dt = datetime.fromisoformat(parsed_data["start_time"].replace("Z", "+00:00"))
             end_dt = datetime.fromisoformat(parsed_data["end_time"].replace("Z", "+00:00"))
             
+            # Нормализуем timezone
+            if start_dt.tzinfo is None:
+                start_dt = pytz.utc.localize(start_dt)
+            else:
+                start_dt = start_dt.astimezone(pytz.utc)
+            
+            if end_dt.tzinfo is None:
+                end_dt = pytz.utc.localize(end_dt)
+            else:
+                end_dt = end_dt.astimezone(pytz.utc)
+            
             # Если время в прошлом, переносим на завтра
             now_utc = datetime.now(pytz.utc)
-            if start_dt.replace(tzinfo=pytz.utc) < now_utc:
+            if start_dt < now_utc:
                 # Переносим на завтра
-                start_dt = start_dt.replace(tzinfo=pytz.utc) + timedelta(days=1)
-                end_dt = end_dt.replace(tzinfo=pytz.utc) + timedelta(days=1)
+                start_dt = start_dt + timedelta(days=1)
+                end_dt = end_dt + timedelta(days=1)
             
             # Убеждаемся, что end_time >= start_time
-            if end_dt.replace(tzinfo=pytz.utc) < start_dt.replace(tzinfo=pytz.utc):
-                end_dt = start_dt.replace(tzinfo=pytz.utc) + timedelta(minutes=30)
+            if end_dt < start_dt:
+                end_dt = start_dt + timedelta(minutes=30)
             
             # Сохраняем в ISO формате
-            parsed_data["start_time"] = start_dt.replace(tzinfo=pytz.utc).isoformat()
-            parsed_data["end_time"] = end_dt.replace(tzinfo=pytz.utc).isoformat()
+            parsed_data["start_time"] = start_dt.isoformat()
+            parsed_data["end_time"] = end_dt.isoformat()
             
         except (ValueError, AttributeError) as e:
             raise ValueError(f"Неверный формат времени: {e}")
