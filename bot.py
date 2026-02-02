@@ -1088,15 +1088,15 @@ async def show_daily_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "❌ Please connect your Google Calendar first using /start",
             reply_markup=build_main_menu()
         )
-            return
+        return
 
     credentials = get_credentials_from_stored(chat_id, stored_tokens)
     if not credentials:
-            await update.message.reply_text(
+        await update.message.reply_text(
             "❌ Authorization error. Please reconnect your Google Calendar using /start",
             reply_markup=build_main_menu()
-            )
-            return
+        )
+        return
 
     try:
         # Получаем таймзону пользователя
@@ -1182,7 +1182,7 @@ async def show_daily_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Всегда создаем клавиатуру, даже если пустая (чтобы избежать ошибки "Inline keyboard expected")
         reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else InlineKeyboardMarkup([])
         
-            await update.message.reply_text(
+        await update.message.reply_text(
             message_text,
             reply_markup=reply_markup,
             parse_mode='Markdown'
@@ -1190,7 +1190,7 @@ async def show_daily_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     except Exception as e:
         print(f"[Bot] Ошибка при отображении задач на сегодня: {e}")
-            await update.message.reply_text(
+        await update.message.reply_text(
             "❌ An error occurred while loading tasks. Please try again.",
             reply_markup=build_main_menu()
         )
@@ -1213,7 +1213,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             reply_markup=None
         )
         context.user_data['waiting_for'] = 'name'
-            return
+        return
 
     elif callback_data == "set_tz":
         await query.answer("")  # Убираем дублирование текста кнопки
@@ -1223,7 +1223,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             reply_markup=build_timezone_keyboard()
         )
         context.user_data['waiting_for'] = 'timezone'
-            return
+        return
 
     elif callback_data == "set_morning":
         await query.answer("")  # Убираем дублирование текста кнопки
@@ -1263,15 +1263,15 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     if not stored_tokens:
         await query.edit_message_text(
             "❌ Please connect your Google Calendar first using /start"
-            )
-            return
+        )
+        return
 
     credentials = get_credentials_from_stored(chat_id, stored_tokens)
     if not credentials:
         await query.edit_message_text(
             "❌ Authorization error. Please reconnect your Google Calendar using /start"
         )
-            return
+        return
 
     # Обработка обновления списка задач
     if callback_data == "refresh_today":
@@ -1366,12 +1366,12 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         except Exception as e:
             print(f"[Bot] Ошибка при обновлении списка задач: {e}")
             await query.answer("❌ Error updating. Please try again.", show_alert=True)
-                return
+        return
 
     # Обработка уже выполненной задачи (повторное нажатие)
     if callback_data.startswith("already_done_"):
         await query.answer("✅ This task is already marked as completed!", show_alert=True)
-            return
+        return
 
     # Обработка отметки задачи как выполненной
     if callback_data.startswith("done_"):
@@ -1470,7 +1470,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                         reply_markup=new_markup,
                         parse_mode='Markdown'
                     )
-    else:
+                else:
                     # Если это не список задач (например, вечерняя сводка), просто обновляем кнопку
                     inline_keyboard = query.message.reply_markup.inline_keyboard if query.message.reply_markup else []
                     
