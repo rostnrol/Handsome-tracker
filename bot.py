@@ -975,10 +975,10 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
     
     chat_id = update.effective_chat.id
     
-        if not is_onboarded(chat_id):
+    if not is_onboarded(chat_id):
         await update.message.reply_text(
             "Please complete the setup first by sending /start"
-            )
+        )
         return
 
     # Трекинг события
