@@ -184,7 +184,7 @@ JSON structure:
 }
 
 CRITICAL RULES:
-1. If the message does NOT look like a task (e.g., "Hello", "How are you", "Thanks", greetings, casual conversation, random words, questions without action), set "is_task": false and return minimal valid JSON.
+1. If the message does NOT look like a task (e.g., "Hello", "How are you", "Thanks", greetings, casual conversation, random words, questions without action, random characters like "000000", meaningless text), set "is_task": false and return minimal valid JSON.
 2. If "is_task": false, you can set summary to empty string, but still provide valid ISO times (use tomorrow 09:00 as default).
 3. If user did NOT specify time explicitly (e.g., "Buy milk", "Call John"), set the task to TOMORROW at 09:00 (default morning slot).
 4. If user specified only date without time, use 09:00 as start time and 09:30 as end time.
@@ -196,7 +196,9 @@ CRITICAL RULES:
 10. description can be empty string if no additional details.
 11. location can be empty string if not mentioned.
 12. If input text is in Russian, keep summary and description in Russian. Otherwise use English.
-13. Be VERY strict: if the message is unclear, ambiguous, or doesn't contain a clear action/task, set "is_task": false.
+13. Be VERY strict: if the message is unclear, ambiguous, doesn't contain a clear action/task, or looks like random text/characters (e.g., "Cheche tv 000000"), set "is_task": false.
+14. A valid task must contain at least one action verb (e.g., "buy", "call", "meet", "go", "do", "make", "send", "write", etc.) or a clear event description.
+15. Random words, numbers, or character sequences without clear meaning are NOT tasks.
 
 IMPORTANT: Return ONLY valid JSON, no markdown formatting, no backticks, no additional text."""
 
