@@ -61,7 +61,8 @@ TF = None  # lazy TimezoneFinder singleton
 def build_main_menu() -> ReplyKeyboardMarkup:
     """Создает главное меню на английском"""
     keyboard = [
-        [KeyboardButton("📅 Open Schedule", web_app=WebAppInfo(url=os.getenv("WEB_APP_URL", "https://example.com")))],
+        [KeyboardButton("📋 Tasks for Today")],
+        [KeyboardButton("📅 Open Google Calendar")],
         [KeyboardButton("⚙️ Settings"), KeyboardButton("🆘 Support")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
@@ -533,6 +534,169 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     chat_id = update.effective_chat.id
     text = update.message.text.strip()
     
+    # Обработка изменений настроек через callback
+    waiting_for = context.user_data.get('waiting_for')
+    if waiting_for == 'name':
+        if text.strip():
+            set_user_name(chat_id, text.strip())
+            await update.message.reply_text(
+                f"✅ Name updated to: {text.strip()}",
+                reply_markup=build_main_menu()
+            )
+            context.user_data.pop('waiting_for', None)
+        else:
+            await update.message.reply_text("Please enter a valid name:")
+        return
+    
+    elif waiting_for == 'timezone':
+        # Используем ту же логику, что и в онбординге
+        if text == "✏️ Enter City Manually":
+            await update.message.reply_text(
+                "Please enter your city/timezone manually (e.g., Europe/London, America/New_York, Asia/Tokyo):",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            context.user_data['waiting_for'] = 'timezone_manual'
+            return
+        
+        if text == "🌍 Choose from UTC List":
+            await update.message.reply_text(
+                "Choose your UTC offset:",
+                reply_markup=build_utc_list_keyboard()
+            )
+            context.user_data['waiting_for'] = 'timezone_utc_list'
+            return
+        
+        await update.message.reply_text(
+            "Please choose one of the options:",
+            reply_markup=build_timezone_keyboard()
+        )
+        return
+    
+    elif waiting_for == 'timezone_manual':
+        try:
+            pytz.timezone(text)
+            set_user_timezone(chat_id, text)
+            await update.message.reply_text(
+                f"✅ Timezone updated to: {text}",
+                reply_markup=build_main_menu()
+            )
+            context.user_data.pop('waiting_for', None)
+        except pytz.exceptions.UnknownTimeZoneError:
+            await update.message.reply_text(
+                "Invalid timezone. Please enter a valid timezone (e.g., Europe/London):"
+            )
+        return
+    
+    elif waiting_for == 'timezone_utc_list':
+        tz = parse_utc_offset(text)
+        if tz:
+            set_user_timezone(chat_id, tz)
+            await update.message.reply_text(
+                f"✅ Timezone updated to: {tz}",
+                reply_markup=build_main_menu()
+            )
+            context.user_data.pop('waiting_for', None)
+        else:
+            await update.message.reply_text(
+                "Please choose from the list:",
+                reply_markup=build_utc_list_keyboard()
+            )
+        return
+    
+    elif waiting_for == 'morning_time':
+        if text == "✏️ Enter Manually":
+            await update.message.reply_text(
+                "Enter time in HH:MM format (e.g., 09:00):",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            context.user_data['waiting_for'] = 'morning_time_manual'
+            return
+        
+        # Проверяем формат времени из кнопок
+        if text in ["08:00", "09:00", "10:00"]:
+            set_morning_time(chat_id, text)
+            await update.message.reply_text(
+                f"✅ Morning briefing time updated to: {text}",
+                reply_markup=build_main_menu()
+            )
+            context.user_data.pop('waiting_for', None)
+        else:
+            await update.message.reply_text(
+                "Please choose from the options or enter manually:",
+                reply_markup=build_morning_time_keyboard()
+            )
+        return
+    
+    elif waiting_for == 'morning_time_manual':
+        try:
+            if ':' in text:
+                parts = text.split(':')
+                if len(parts) == 2:
+                    hour = int(parts[0].strip())
+                    minute = int(parts[1].strip())
+                    if 0 <= hour <= 23 and 0 <= minute <= 59:
+                        time_str = f"{hour:02d}:{minute:02d}"
+                        set_morning_time(chat_id, time_str)
+                        await update.message.reply_text(
+                            f"✅ Morning briefing time updated to: {time_str}",
+                            reply_markup=build_main_menu()
+                        )
+                        context.user_data.pop('waiting_for', None)
+                        return
+            raise ValueError("Invalid time format")
+        except (ValueError, IndexError):
+            await update.message.reply_text(
+                "Invalid time format. Please enter time in HH:MM format (e.g., 09:00):"
+            )
+        return
+    
+    elif waiting_for == 'evening_time':
+        if text == "✏️ Enter Manually":
+            await update.message.reply_text(
+                "Enter time in HH:MM format (e.g., 21:00):",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            context.user_data['waiting_for'] = 'evening_time_manual'
+            return
+        
+        # Проверяем формат времени из кнопок
+        if text in ["18:00", "21:00", "23:00"]:
+            set_evening_time(chat_id, text)
+            await update.message.reply_text(
+                f"✅ Evening recap time updated to: {text}",
+                reply_markup=build_main_menu()
+            )
+            context.user_data.pop('waiting_for', None)
+        else:
+            await update.message.reply_text(
+                "Please choose from the options or enter manually:",
+                reply_markup=build_evening_time_keyboard()
+            )
+        return
+    
+    elif waiting_for == 'evening_time_manual':
+        try:
+            if ':' in text:
+                parts = text.split(':')
+                if len(parts) == 2:
+                    hour = int(parts[0].strip())
+                    minute = int(parts[1].strip())
+                    if 0 <= hour <= 23 and 0 <= minute <= 59:
+                        time_str = f"{hour:02d}:{minute:02d}"
+                        set_evening_time(chat_id, time_str)
+                        await update.message.reply_text(
+                            f"✅ Evening recap time updated to: {time_str}",
+                            reply_markup=build_main_menu()
+                        )
+                        context.user_data.pop('waiting_for', None)
+                        return
+            raise ValueError("Invalid time format")
+        except (ValueError, IndexError):
+            await update.message.reply_text(
+                "Invalid time format. Please enter time in HH:MM format (e.g., 21:00):"
+            )
+        return
+    
     # Обработка онбординга
     if context.chat_data.get('onboard_stage') == 'ask_name':
         # Вопрос об имени
@@ -715,11 +879,35 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         settings_text += f"Timezone: {tz}\n"
         settings_text += f"Morning briefing: {morning_time}\n"
         settings_text += f"Evening recap: {evening_time}\n\n"
-        settings_text += "To change settings, send /start to reset onboarding."
+        settings_text += "Select what you want to change:"
+        
+        keyboard = [
+            [InlineKeyboardButton("✏️ Change Name", callback_data="set_name")],
+            [InlineKeyboardButton("🌍 Change Timezone", callback_data="set_tz")],
+            [InlineKeyboardButton("🌅 Morning Time", callback_data="set_morning")],
+            [InlineKeyboardButton("🌙 Evening Time", callback_data="set_evening")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.message.reply_text(
             settings_text,
-            reply_markup=build_main_menu()
+            reply_markup=reply_markup
+        )
+        return
+    
+    if text == "📋 Tasks for Today":
+        # Показываем задачи на сегодня
+        await show_daily_tasks(update, context)
+        return
+    
+    if text == "📅 Open Google Calendar":
+        # Отправляем ссылку на Google Calendar
+        calendar_url = "https://calendar.google.com/calendar"
+        keyboard = [[InlineKeyboardButton("📅 Open Google Calendar", url=calendar_url)]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            "📅 Open your Google Calendar:",
+            reply_markup=reply_markup
         )
         return
 
@@ -859,10 +1047,20 @@ async def process_task(update: Update, context: ContextTypes.DEFAULT_TYPE, text:
             track_event(chat_id, "error", {"error_type": "ai_parse_failed"})
             return
         
+        # Проверяем, является ли это задачей
+        if not ai_parsed.get("is_task", True):
+            await update.message.reply_text(
+                "Я не понял, что это за задача. Попробуй сформулировать иначе (например: 'Встреча завтра в 3').",
+                reply_markup=build_main_menu()
+            )
+            track_event(chat_id, "not_a_task", {"source": source})
+            return
+        
         # Трекинг успешного парсинга
         track_event(chat_id, f"task_processed_ai_{source}", {
             "has_summary": bool(ai_parsed.get("summary")),
-            "has_description": bool(ai_parsed.get("description"))
+            "has_description": bool(ai_parsed.get("description")),
+            "has_location": bool(ai_parsed.get("location"))
         })
         
         # Создаем событие в календаре
@@ -877,6 +1075,95 @@ async def process_task(update: Update, context: ContextTypes.DEFAULT_TYPE, text:
         )
 
 
+async def show_daily_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает задачи на сегодня с возможностью отметки"""
+    chat_id = update.effective_chat.id
+    
+    # Проверяем авторизацию Google Calendar
+    stored_tokens = get_google_tokens(chat_id)
+    if not stored_tokens:
+        await update.message.reply_text(
+            "❌ Please connect your Google Calendar first using /start",
+            reply_markup=build_main_menu()
+        )
+        return
+    
+    credentials = get_credentials_from_stored(chat_id, stored_tokens)
+    if not credentials:
+        await update.message.reply_text(
+            "❌ Authorization error. Please reconnect your Google Calendar using /start",
+            reply_markup=build_main_menu()
+        )
+        return
+    
+    try:
+        # Получаем таймзону пользователя
+        user_timezone = get_user_timezone(chat_id) or DEFAULT_TZ
+        
+        # Получаем события на сегодня
+        events = get_today_events(credentials, user_timezone)
+        
+        if not events:
+            await update.message.reply_text(
+                "📅 **План на сегодня:**\n\n"
+                "Нет запланированных задач на сегодня! 🎉",
+                reply_markup=build_main_menu(),
+                parse_mode='Markdown'
+            )
+            return
+        
+        # Разделяем выполненные и невыполненные задачи
+        completed_events = [e for e in events if e.get('summary', '').startswith('✅ ')]
+        incomplete_events = [e for e in events if not e.get('summary', '').startswith('✅ ')]
+        
+        # Формируем текст сообщения
+        message_text = "📅 **План на сегодня:**\n\n"
+        
+        # Добавляем выполненные задачи
+        if completed_events:
+            for event in completed_events:
+                summary = event.get('summary', 'Task')
+                # Убираем "✅ " для отображения, так как уже есть в тексте
+                if summary.startswith('✅ '):
+                    summary = summary[2:]
+                message_text += f"✅ {summary}\n"
+            message_text += "\n"
+        
+        # Если есть невыполненные задачи, добавляем их в клавиатуру
+        keyboard = []
+        for event in incomplete_events:
+            summary = event.get('summary', 'Task')
+            event_id = event.get('id', '')
+            if event_id:
+                # Ограничиваем длину текста кнопки (Telegram лимит 64 символа)
+                button_text = summary[:60] if len(summary) > 60 else summary
+                keyboard.append([InlineKeyboardButton(button_text, callback_data=f"done_{event_id}")])
+        
+        # Добавляем кнопку обновления
+        if keyboard:
+            keyboard.append([InlineKeyboardButton("🔄 Обновить", callback_data="refresh_today")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+        
+        # Если нет невыполненных задач, добавляем только кнопку обновления
+        if not keyboard and completed_events:
+            keyboard = [[InlineKeyboardButton("🔄 Обновить", callback_data="refresh_today")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            message_text,
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+        
+    except Exception as e:
+        print(f"[Bot] Ошибка при отображении задач на сегодня: {e}")
+        await update.message.reply_text(
+            "❌ An error occurred while loading tasks. Please try again.",
+            reply_markup=build_main_menu()
+        )
+
+
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик нажатий на inline-кнопки"""
     query = update.callback_query
@@ -885,7 +1172,42 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     chat_id = query.message.chat_id
     callback_data = query.data
     
-    # Проверяем авторизацию Google Calendar
+    # Обработка настроек (не требуют авторизации Google Calendar)
+    if callback_data == "set_name":
+        await query.edit_message_text(
+            "✏️ Enter your new name:",
+            reply_markup=None
+        )
+        context.user_data['waiting_for'] = 'name'
+        return
+    
+    elif callback_data == "set_tz":
+        await query.edit_message_text(
+            "🌍 Share your location or enter timezone manually:",
+            reply_markup=build_timezone_keyboard()
+        )
+        context.user_data['waiting_for'] = 'timezone'
+        return
+    
+    elif callback_data == "set_morning":
+        await query.edit_message_text(
+            "🌅 At what time do you want to receive your Daily Plan?\n\n"
+            "Send time in HH:MM format (e.g., 09:00):",
+            reply_markup=build_morning_time_keyboard()
+        )
+        context.user_data['waiting_for'] = 'morning_time'
+        return
+    
+    elif callback_data == "set_evening":
+        await query.edit_message_text(
+            "🌙 When should I send you the Evening Recap?\n\n"
+            "Send time in HH:MM format (e.g., 21:00):",
+            reply_markup=build_evening_time_keyboard()
+        )
+        context.user_data['waiting_for'] = 'evening_time'
+        return
+    
+    # Для остальных callback нужна авторизация Google Calendar
     stored_tokens = get_google_tokens(chat_id)
     if not stored_tokens:
         await query.edit_message_text(
@@ -898,6 +1220,78 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text(
             "❌ Authorization error. Please reconnect your Google Calendar using /start"
         )
+        return
+    
+    # Обработка обновления списка задач
+    if callback_data == "refresh_today":
+        try:
+            # Авторизация уже проверена выше
+            # Получаем таймзону пользователя
+            user_timezone = get_user_timezone(chat_id) or DEFAULT_TZ
+            
+            # Получаем события на сегодня
+            events = get_today_events(credentials, user_timezone)
+            
+            if not events:
+                await query.edit_message_text(
+                    "📅 **План на сегодня:**\n\n"
+                    "Нет запланированных задач на сегодня! 🎉",
+                    reply_markup=None,  # Явно очищаем клавиатуру
+                    parse_mode='Markdown'
+                )
+                await query.answer("✅ Список обновлен!")
+                return
+            
+            # Разделяем выполненные и невыполненные задачи
+            completed_events = [e for e in events if e.get('summary', '').startswith('✅ ')]
+            incomplete_events = [e for e in events if not e.get('summary', '').startswith('✅ ')]
+            
+            # Формируем текст сообщения
+            message_text = "📅 **План на сегодня:**\n\n"
+            
+            # Добавляем выполненные задачи
+            if completed_events:
+                for event in completed_events:
+                    summary = event.get('summary', 'Task')
+                    if summary.startswith('✅ '):
+                        summary = summary[2:]
+                    message_text += f"✅ {summary}\n"
+                message_text += "\n"
+            
+            # Создаем клавиатуру для невыполненных задач
+            keyboard = []
+            for event in incomplete_events:
+                summary = event.get('summary', 'Task')
+                event_id = event.get('id', '')
+                if event_id:
+                    button_text = summary[:60] if len(summary) > 60 else summary
+                    keyboard.append([InlineKeyboardButton(button_text, callback_data=f"done_{event_id}")])
+            
+            # Добавляем кнопку обновления
+            if keyboard:
+                keyboard.append([InlineKeyboardButton("🔄 Обновить", callback_data="refresh_today")])
+            
+            reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+            
+            # Если нет невыполненных задач, добавляем только кнопку обновления
+            if not keyboard and completed_events:
+                keyboard = [[InlineKeyboardButton("🔄 Обновить", callback_data="refresh_today")]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.edit_message_text(
+                message_text,
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+            await query.answer("✅ Список обновлен!")
+        except Exception as e:
+            print(f"[Bot] Ошибка при обновлении списка задач: {e}")
+            await query.answer("❌ Ошибка при обновлении. Попробуйте еще раз.", show_alert=True)
+        return
+    
+    # Обработка уже выполненной задачи (повторное нажатие)
+    if callback_data.startswith("already_done_"):
+        await query.answer("✅ Эта задача уже отмечена как выполненная!", show_alert=True)
         return
     
     # Обработка отметки задачи как выполненной
@@ -919,26 +1313,79 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             success = mark_event_done(credentials, event_id, event_title)
             
             if success:
-                # Обновляем сообщение: меняем кнопку на "✅ {summary}" без callback_data
-                # Получаем текущую клавиатуру
-                inline_keyboard = query.message.reply_markup.inline_keyboard if query.message.reply_markup else []
+                # Проверяем, является ли это сообщение со списком задач (содержит "План на сегодня")
+                message_text = query.message.text or ""
+                is_tasks_list = "План на сегодня" in message_text or "Tasks for Today" in message_text
                 
-                # Создаем новую клавиатуру, удаляя нажатую кнопку (или заменяя её на текст в сообщении)
-                new_keyboard = []
-                for row in inline_keyboard:
-                    new_row = []
-                    for button in row:
-                        if button.callback_data == callback_data:
-                            # Пропускаем эту кнопку - она уже выполнена, не добавляем её в новую клавиатуру
-                            continue
-                        else:
-                            new_row.append(button)
-                    if new_row:
-                        new_keyboard.append(new_row)
+                if is_tasks_list:
+                    # Если это список задач, обновляем весь список
+                    user_timezone = get_user_timezone(chat_id) or DEFAULT_TZ
+                    events = get_today_events(credentials, user_timezone)
+                    
+                    # Разделяем выполненные и невыполненные задачи
+                    completed_events = [e for e in events if e.get('summary', '').startswith('✅ ')]
+                    incomplete_events = [e for e in events if not e.get('summary', '').startswith('✅ ')]
+                    
+                    # Формируем новый текст сообщения
+                    new_message_text = "📅 **План на сегодня:**\n\n"
+                    
+                    # Добавляем выполненные задачи
+                    if completed_events:
+                        for event in completed_events:
+                            summary = event.get('summary', 'Task')
+                            if summary.startswith('✅ '):
+                                summary = summary[2:]
+                            new_message_text += f"✅ {summary}\n"
+                        new_message_text += "\n"
+                    
+                    # Создаем новую клавиатуру для невыполненных задач
+                    new_keyboard = []
+                    for event in incomplete_events:
+                        summary = event.get('summary', 'Task')
+                        event_id_item = event.get('id', '')
+                        if event_id_item:
+                            button_text = summary[:60] if len(summary) > 60 else summary
+                            new_keyboard.append([InlineKeyboardButton(button_text, callback_data=f"done_{event_id_item}")])
+                    
+                    # Добавляем кнопку обновления
+                    if new_keyboard:
+                        new_keyboard.append([InlineKeyboardButton("🔄 Обновить", callback_data="refresh_today")])
+                    
+                    new_markup = InlineKeyboardMarkup(new_keyboard) if new_keyboard else None
+                    
+                    # Если нет невыполненных задач, добавляем только кнопку обновления
+                    if not new_keyboard and completed_events:
+                        new_keyboard = [[InlineKeyboardButton("🔄 Обновить", callback_data="refresh_today")]]
+                        new_markup = InlineKeyboardMarkup(new_keyboard)
+                    
+                    await query.edit_message_text(
+                        new_message_text,
+                        reply_markup=new_markup,
+                        parse_mode='Markdown'
+                    )
+                else:
+                    # Если это не список задач (например, вечерняя сводка), просто обновляем кнопку
+                    inline_keyboard = query.message.reply_markup.inline_keyboard if query.message.reply_markup else []
+                    
+                    new_keyboard = []
+                    for row in inline_keyboard:
+                        new_row = []
+                        for button in row:
+                            if button.callback_data == callback_data:
+                                # Изменяем кнопку: добавляем "✅" к тексту
+                                button_text = button.text
+                                if not button_text.startswith('✅ '):
+                                    button_text = f"✅ {button_text}"
+                                new_row.append(InlineKeyboardButton(button_text, callback_data=f"already_done_{event_id}"))
+                            else:
+                                new_row.append(button)
+                        if new_row:
+                            new_keyboard.append(new_row)
+                    
+                    new_markup = InlineKeyboardMarkup(new_keyboard) if new_keyboard else None
+                    await query.edit_message_reply_markup(reply_markup=new_markup)
                 
-                new_markup = InlineKeyboardMarkup(new_keyboard) if new_keyboard else None
-                
-                await query.edit_message_reply_markup(reply_markup=new_markup)
+                await query.answer("✅ Задача отмечена как выполненная!")
                 track_event(chat_id, "task_marked_done", {"event_id": event_id})
             else:
                 await query.answer("❌ Failed to mark task as done. Please try again.", show_alert=True)
@@ -948,8 +1395,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             await query.answer("❌ An error occurred. Please try again.", show_alert=True)
             track_event(chat_id, "error", {"error_type": "mark_task_done", "error_message": str(e)[:100]})
     
-    # Обработка переноса всех задач на завтра
-    elif callback_data == "reschedule_all":
+    # Обработка переноса остатка задач на завтра
+    elif callback_data == "reschedule_leftovers":
         try:
             from datetime import timedelta
             from services.db_service import get_user_timezone
@@ -986,14 +1433,17 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                     
                     # Парсим текущее время начала
                     start_str = calendar_event['start'].get('dateTime', calendar_event['start'].get('date'))
-                    if 'T' in start_str:
+                    is_all_day = 'T' not in start_str
+                    
+                    if is_all_day:
+                        # Если это событие на весь день, используем 09:00 завтра
+                        start_dt = tomorrow.replace(hour=9, minute=0, second=0, microsecond=0)
+                        start_dt = tz.localize(start_dt) if start_dt.tzinfo is None else start_dt
+                    else:
+                        # Timed событие - парсим текущее время
                         start_dt = datetime.fromisoformat(start_str.replace('Z', '+00:00'))
                         if start_dt.tzinfo is None:
                             start_dt = pytz.utc.localize(start_dt)
-                    else:
-                        # Если это событие на весь день, используем 09:00
-                        start_dt = tomorrow.replace(hour=9, minute=0, second=0, microsecond=0)
-                        start_dt = tz.localize(start_dt) if start_dt.tzinfo is None else start_dt
                     
                     # Вычисляем длительность
                     end_str = calendar_event['end'].get('dateTime', calendar_event['end'].get('date'))
@@ -1003,14 +1453,19 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                             end_dt = pytz.utc.localize(end_dt)
                         duration = end_dt - start_dt
                     else:
-                        duration = timedelta(hours=1)  # По умолчанию 1 час
+                        duration = timedelta(hours=1)  # По умолчанию 1 час для all-day событий
                     
-                    # Переносим на завтра на то же время (или на утро, если время прошло)
-                    new_start = start_dt + timedelta(days=1)
-                    if new_start < now_local:
-                        # Если время уже прошло, ставим на утро завтра
-                        new_start = tomorrow.replace(hour=9, minute=0, second=0, microsecond=0)
-                        new_start = tz.localize(new_start) if new_start.tzinfo is None else new_start
+                    # Переносим на завтра
+                    if is_all_day:
+                        # Для all-day событий start_dt уже установлен на завтра, не добавляем день
+                        new_start = start_dt
+                    else:
+                        # Для timed событий добавляем один день
+                        new_start = start_dt + timedelta(days=1)
+                        if new_start < now_local:
+                            # Если время уже прошло, ставим на утро завтра
+                            new_start = tomorrow.replace(hour=9, minute=0, second=0, microsecond=0)
+                            new_start = tz.localize(new_start) if new_start.tzinfo is None else new_start
                     
                     new_end = new_start + duration
                     
@@ -1029,8 +1484,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             
             if rescheduled_count > 0:
                 await query.edit_message_text(
-                    f"✅ Successfully rescheduled {rescheduled_count} task(s) to tomorrow!\n\n"
-                    f"{query.message.text}"
+                    f"Перенес {rescheduled_count} задач на завтра."
                 )
                 track_event(chat_id, "tasks_rescheduled", {"count": rescheduled_count})
             else:

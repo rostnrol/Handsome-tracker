@@ -239,6 +239,11 @@ def create_event(credentials: Credentials, event_data: Dict[str, str]) -> Option
             },
         }
         
+        # Добавляем location, если указан
+        location = event_data.get("location", "")
+        if location:
+            event['location'] = location
+        
         # Создаем событие
         created_event = service.events().insert(calendarId='primary', body=event).execute()
         
@@ -271,13 +276,20 @@ def mark_event_done(credentials: Credentials, event_id: str, event_title: str) -
         # Получаем текущее событие
         event = service.events().get(calendarId='primary', eventId=event_id).execute()
         
+        # Получаем текущий summary из API (актуальное значение)
+        current_summary = event.get('summary', event_title)
+        
         # Проверяем, не отмечено ли уже событие как выполненное
-        if event.get('summary', '').startswith('✅ '):
+        if current_summary.startswith('✅ '):
             # Уже выполнено
             return True
         
-        # Добавляем эмодзи в начало заголовка
-        new_summary = f"✅ {event_title}"
+        # Добавляем эмодзи в начало заголовка, используя актуальный current_summary
+        # Убираем "✅ " если уже есть (на случай, если был передан с эмодзи)
+        clean_summary = current_summary
+        if clean_summary.startswith('✅ '):
+            clean_summary = clean_summary[2:]
+        new_summary = f"✅ {clean_summary}"
         
         # Обновляем событие
         event['summary'] = new_summary

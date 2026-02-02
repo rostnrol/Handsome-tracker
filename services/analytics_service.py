@@ -3,7 +3,7 @@ Analytics Service для отправки событий в Amplitude
 """
 import os
 from typing import Dict, Optional
-from amplitude import Amplitude, BaseEvent, EventOptions, Identify, IdentifyEvent
+from amplitude import Amplitude, Config, BaseEvent, EventOptions, Identify, IdentifyEvent
 
 
 # Инициализация клиента Amplitude
@@ -16,8 +16,9 @@ def init_amplitude():
     api_key = os.getenv("AMPLITUDE_API_KEY")
     if api_key:
         try:
-            amplitude_client = Amplitude(api_key)
-            print(f"[Analytics] Amplitude клиент успешно инициализирован (ключ: {api_key[:10]}...)")
+            # Используем EU зону для сервера, так как проект находится в Европе
+            amplitude_client = Amplitude(api_key, configuration=Config(server_zone='EU'))
+            print(f"[Analytics] Amplitude клиент успешно инициализирован для EU зоны (ключ: {api_key[:10]}...)")
         except Exception as e:
             print(f"[Analytics] ОШИБКА при инициализации Amplitude клиента: {e}")
             print(f"[Analytics] Проверьте правильность AMPLITUDE_API_KEY в настройках Render")

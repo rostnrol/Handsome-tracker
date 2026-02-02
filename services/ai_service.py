@@ -149,7 +149,7 @@ async def parse_with_ai(text: str, user_timezone: str = "UTC", source_language: 
         source_language: Язык исходного текста (для сохранения в summary/description)
     
     Returns:
-        Словарь с ключами: summary, start_time, end_time, description
+        Словарь с ключами: is_task, summary, start_time, end_time, description, location
         Или None в случае ошибки
     """
     if not client:
@@ -159,32 +159,40 @@ async def parse_with_ai(text: str, user_timezone: str = "UTC", source_language: 
     # Определяем текущее время в часовом поясе пользователя
     tz = pytz.timezone(user_timezone)
     now_local = datetime.now(tz)
+    current_date = now_local.strftime('%Y-%m-%d')
+    current_time = now_local.strftime('%H:%M:%S')
     
     system_prompt = """You are an assistant for parsing tasks and events from text.
 Your task is to extract information about the task and return STRICTLY valid JSON without additional characters.
 
 JSON structure:
 {
+    "is_task": bool,
     "summary": "brief task title (keep original language if Russian, otherwise English)",
     "start_time": "ISO 8601 format (YYYY-MM-DDTHH:MM:SS+00:00 or YYYY-MM-DDTHH:MM:SSZ)",
     "end_time": "ISO 8601 format (YYYY-MM-DDTHH:MM:SS+00:00 or YYYY-MM-DDTHH:MM:SSZ)",
-    "description": "detailed task description (can be empty, keep original language)"
+    "description": "detailed task description (can be empty, keep original language)",
+    "location": "location if mentioned (can be empty string)"
 }
 
-Rules:
-1. If user didn't specify date, use TODAY.
-2. If user didn't specify time, use NOW + 30 minutes as start_time, and start_time + 30 minutes as end_time.
-3. If user specified only date without time, use 09:00 as start time and 09:30 as end time.
-4. If user specified only time without date, use TODAY.
-5. If time is in the past, move to tomorrow.
-6. All times must be in UTC (convert from user timezone).
-7. summary should be brief (up to 100 characters).
-8. description can be empty string if no additional details.
-9. If input text is in Russian, keep summary and description in Russian. Otherwise use English.
+CRITICAL RULES:
+1. If the message does NOT look like a task (e.g., "Hello", "How are you", "Thanks", greetings, casual conversation), set "is_task": false and return minimal valid JSON.
+2. If "is_task": false, you can set summary to empty string, but still provide valid ISO times (use tomorrow 09:00 as default).
+3. If user did NOT specify time explicitly (e.g., "Buy milk", "Call John"), set the task to TOMORROW at 09:00 (default morning slot).
+4. If user specified only date without time, use 09:00 as start time and 09:30 as end time.
+5. If user specified only time without date, use TODAY (or tomorrow if time has passed).
+6. If time is in the past, move to tomorrow.
+7. All times must be in UTC (convert from user timezone).
+8. Default duration is 30 minutes (end_time = start_time + 30 minutes).
+9. summary should be brief (up to 100 characters).
+10. description can be empty string if no additional details.
+11. location can be empty string if not mentioned.
+12. If input text is in Russian, keep summary and description in Russian. Otherwise use English.
 
 IMPORTANT: Return ONLY valid JSON, no markdown formatting, no backticks, no additional text."""
 
-    user_prompt = f"""Current time: {now_local.strftime('%Y-%m-%d %H:%M:%S %Z')}
+    user_prompt = f"""Current date: {current_date}
+Current time: {current_time}
 User timezone: {user_timezone}
 
 Task: {text}
@@ -192,15 +200,30 @@ Task: {text}
 Return JSON with task information."""
 
     try:
-        response = await client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.3,
-            response_format={"type": "json_object"}
-        )
+        # Пытаемся использовать gpt-5-mini, fallback на gpt-4o-mini
+        model = "gpt-5-mini"
+        try:
+            response = await client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.3,
+                response_format={"type": "json_object"}
+            )
+        except Exception as e:
+            print(f"[AI Service] Модель {model} недоступна, используем gpt-4o-mini: {e}")
+            model = "gpt-4o-mini"
+            response = await client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.3,
+                response_format={"type": "json_object"}
+            )
         
         content = response.choices[0].message.content.strip()
         
@@ -217,10 +240,20 @@ Return JSON with task information."""
         parsed_data = json.loads(content)
         
         # Валидация структуры
-        required_keys = ["summary", "start_time", "end_time", "description"]
+        required_keys = ["is_task", "summary", "start_time", "end_time", "description", "location"]
         for key in required_keys:
             if key not in parsed_data:
-                raise ValueError(f"Отсутствует обязательный ключ: {key}")
+                # Устанавливаем значения по умолчанию для отсутствующих ключей
+                if key == "is_task":
+                    parsed_data[key] = True  # По умолчанию считаем, что это задача
+                elif key == "location":
+                    parsed_data[key] = ""
+                else:
+                    raise ValueError(f"Отсутствует обязательный ключ: {key}")
+        
+        # Если это не задача, возвращаем сразу
+        if not parsed_data.get("is_task", True):
+            return parsed_data
         
         # Валидация и нормализация времени
         try:

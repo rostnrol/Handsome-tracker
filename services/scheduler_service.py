@@ -156,11 +156,16 @@ async def send_evening_recap(bot, chat_id: int, user_timezone: str):
         events = get_today_events(credentials, user_timezone)
         
         # Фильтруем выполненные (те, что начинаются с "✅")
-        completed_events = [e for e in events if e.get('summary', '').startswith('✅ ')]
         incomplete_events = [e for e in events if not e.get('summary', '').startswith('✅ ')]
         
-        # Генерируем вечернюю сводку через AI
-        recap = await generate_evening_recap(events, user_timezone)
+        # Если нет неотмеченных событий, отправляем просто сводку
+        if not incomplete_events:
+            recap = await generate_evening_recap(events, user_timezone)
+            await bot.send_message(
+                chat_id=chat_id,
+                text=recap
+            )
+            return
         
         # Создаем inline-клавиатуру для невыполненных задач
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -171,19 +176,18 @@ async def send_evening_recap(bot, chat_id: int, user_timezone: str):
             event_id = event.get('id', '')
             if event_id:
                 # Ограничиваем длину текста кнопки (Telegram лимит 64 символа)
-                button_text = f"⬜ {summary[:60]}" if len(summary) > 60 else f"⬜ {summary}"
+                button_text = summary[:60] if len(summary) > 60 else summary
                 keyboard.append([InlineKeyboardButton(button_text, callback_data=f"done_{event_id}")])
         
-        # Добавляем кнопку для переноса всех задач на завтра
-        if incomplete_events:
-            keyboard.append([InlineKeyboardButton("➡️ Перенести остаток на завтра", callback_data="reschedule_all")])
+        # Добавляем кнопку для переноса остатка на завтра
+        keyboard.append([InlineKeyboardButton("➡️ Перенести остаток на завтра", callback_data="reschedule_leftovers")])
         
         reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
         
-        # Отправляем сводку с кнопками
+        # Отправляем сообщение с кнопками
         await bot.send_message(
             chat_id=chat_id,
-            text=recap,
+            text="Как прошел день? Отметь выполненное:",
             reply_markup=reply_markup
         )
     except Exception as e:
