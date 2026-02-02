@@ -437,7 +437,7 @@ async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if tz:
         set_user_timezone(chat_id, tz)
         await ask_morning_time(update, context)
-        else:
+    else:
         await update.message.reply_text(
             "Couldn't determine timezone from location. Please try another option.",
             reply_markup=build_timezone_keyboard()
