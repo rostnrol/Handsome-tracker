@@ -1032,29 +1032,29 @@ async def process_task(update: Update, context: ContextTypes.DEFAULT_TYPE, text:
         ai_parsed = await parse_with_ai(text, tz, source_language)
         
         if not ai_parsed:
-        await update.message.reply_text(
+            await update.message.reply_text(
                 "❌ Couldn't process the task. Please try again with more details.",
                 reply_markup=build_main_menu()
-        )
+            )
             track_event(chat_id, "error", {"error_type": "ai_parse_failed"})
-        return
+            return
 
         # Проверяем, является ли это задачей
         if not ai_parsed.get("is_task", True):
-        await update.message.reply_text(
+            await update.message.reply_text(
                 "I didn't understand what task this is. Please try again with a clearer format (e.g., 'Meeting tomorrow at 3 PM' or 'Buy milk today at 15:00').",
                 reply_markup=build_main_menu()
-        )
+            )
             track_event(chat_id, "not_a_task", {"source": source})
-        return
+            return
 
         # Дополнительная проверка: если summary пустой или слишком короткий, это может быть не задача
         summary = ai_parsed.get("summary", "").strip()
         if not summary or len(summary) < 2:
-                await update.message.reply_text(
+            await update.message.reply_text(
                 "I didn't understand what task this is. Please specify a clear action or event (e.g., 'Meeting tomorrow at 3 PM' or 'Buy milk today at 15:00').",
                 reply_markup=build_main_menu()
-                )
+            )
             track_event(chat_id, "not_a_task", {"source": source, "reason": "empty_summary"})
             return
 
