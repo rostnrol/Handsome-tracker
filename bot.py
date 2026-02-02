@@ -1047,7 +1047,20 @@ async def create_calendar_event(update: Update, context: ContextTypes.DEFAULT_TY
     chat_id = update.effective_chat.id
     
     # Проверяем авторизацию
-    if not has_google_auth(chat_id):
+    print(f"[Bot] create_calendar_event вызван для chat_id={chat_id}, source={source}")
+    has_auth = has_google_auth(chat_id)
+    print(f"[Bot] Результат проверки авторизации для chat_id={chat_id}: {has_auth}")
+    
+    if not has_auth:
+        # Дополнительная проверка - может быть токены есть, но refresh_token отсутствует
+        stored_tokens = get_google_tokens(chat_id)
+        if stored_tokens:
+            print(f"[Bot] Токены найдены для chat_id={chat_id}, но авторизация не прошла. Детали:")
+            print(f"[Bot] - token: {'есть' if stored_tokens.get('token') else 'нет'}")
+            print(f"[Bot] - refresh_token: {'есть' if stored_tokens.get('refresh_token') else 'нет'}")
+            print(f"[Bot] - client_id: {'есть' if stored_tokens.get('client_id') else 'нет'}")
+            print(f"[Bot] - client_secret: {'есть' if stored_tokens.get('client_secret') else 'нет'}")
+        
         # Формируем redirect_uri для callback (используем тот же логику, что и в finish_onboarding)
         base_url = os.getenv("BASE_URL")
         if not base_url:
@@ -1056,6 +1069,7 @@ async def create_calendar_event(update: Update, context: ContextTypes.DEFAULT_TY
         redirect_uri = f"{base_url}/google/callback"
         
         auth_url = get_authorization_url(chat_id, redirect_uri)
+        print(f"[Bot] Отправляем ссылку на авторизацию Google Calendar для chat_id={chat_id}")
         await update.message.reply_text(
             f"🔗 Please connect your Google Calendar first:\n{auth_url}",
             reply_markup=build_main_menu()
