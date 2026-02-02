@@ -41,7 +41,7 @@ from services.calendar_service import (
 from services.scheduler_service import get_today_events
 from services.analytics_service import track_event
 from services.scheduler_service import start_scheduler
-from services.db_service import get_google_tokens
+from services.db_service import get_google_tokens, save_google_tokens
 
 # ---- timezonefinder (pure Python) ----
 try:
@@ -293,45 +293,15 @@ def set_onboarded(chat_id: int, done: bool = True):
     con.close()
 
 
-# ----------------- Google OAuth Storage -----------------
-
-def save_google_tokens(user_id: int, tokens: Dict[str, str]):
-    """Сохраняет Google OAuth токены для пользователя"""
-    con = get_con()
-    cur = con.cursor()
-    cur.execute(
-        """
-        INSERT INTO google_oauth_tokens 
-        (user_id, token, refresh_token, token_uri, client_id, client_secret, scopes, updated_utc)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(user_id) DO UPDATE SET
-            token=excluded.token,
-            refresh_token=excluded.refresh_token,
-            token_uri=excluded.token_uri,
-            client_id=excluded.client_id,
-            client_secret=excluded.client_secret,
-            scopes=excluded.scopes,
-            updated_utc=excluded.updated_utc
-        """,
-        (
-            user_id,
-            tokens.get("token"),
-            tokens.get("refresh_token"),
-            tokens.get("token_uri"),
-            tokens.get("client_id"),
-            tokens.get("client_secret"),
-            json.dumps(tokens.get("scopes", [])),
-            datetime.utcnow().isoformat()
-        ),
-    )
-    con.commit()
-    con.close()
-
-
 def has_google_auth(user_id: int) -> bool:
     """Проверяет, авторизован ли пользователь в Google"""
     tokens = get_google_tokens(user_id)
-    return tokens is not None and tokens.get("refresh_token") is not None
+    refresh_token = tokens.get("refresh_token") if tokens else None
+    has_auth = tokens is not None and refresh_token is not None and refresh_token != ""
+    print(f"[Bot] Проверка авторизации для user_id={user_id}: {'авторизован' if has_auth else 'не авторизован'}")
+    if tokens and not has_auth:
+        print(f"[Bot] Причина: tokens={'есть' if tokens else 'нет'}, refresh_token={'есть' if refresh_token else 'отсутствует'}")
+    return has_auth
 
 
 def tz_from_location(lat: float, lon: float) -> Optional[str]:

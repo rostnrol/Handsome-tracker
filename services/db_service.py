@@ -25,7 +25,7 @@ def get_google_tokens(user_id: int) -> Optional[Dict]:
     row = cur.fetchone()
     con.close()
     if row:
-        return {
+        tokens = {
             "token": row[0],
             "refresh_token": row[1],
             "token_uri": row[2],
@@ -33,7 +33,44 @@ def get_google_tokens(user_id: int) -> Optional[Dict]:
             "client_secret": row[4],
             "scopes": json.loads(row[5]) if row[5] else []
         }
+        print(f"[DB Service] Получены токены для user_id={user_id}, refresh_token={'есть' if tokens.get('refresh_token') else 'отсутствует'}")
+        return tokens
+    print(f"[DB Service] Токены для user_id={user_id} не найдены в БД")
     return None
+
+
+def save_google_tokens(user_id: int, tokens: Dict) -> None:
+    """Сохраняет Google OAuth токены для пользователя"""
+    con = get_con()
+    cur = con.cursor()
+    cur.execute(
+        """
+        INSERT INTO google_oauth_tokens 
+        (user_id, token, refresh_token, token_uri, client_id, client_secret, scopes, updated_utc)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            token=excluded.token,
+            refresh_token=excluded.refresh_token,
+            token_uri=excluded.token_uri,
+            client_id=excluded.client_id,
+            client_secret=excluded.client_secret,
+            scopes=excluded.scopes,
+            updated_utc=excluded.updated_utc
+        """,
+        (
+            user_id,
+            tokens.get("token"),
+            tokens.get("refresh_token"),
+            tokens.get("token_uri"),
+            tokens.get("client_id"),
+            tokens.get("client_secret"),
+            json.dumps(tokens.get("scopes", [])),
+            datetime.utcnow().isoformat()
+        ),
+    )
+    con.commit()
+    con.close()
+    print(f"[DB Service] Токены сохранены для user_id={user_id}, refresh_token={'есть' if tokens.get('refresh_token') else 'отсутствует'}")
 
 
 def get_user_timezone(chat_id: int) -> Optional[str]:

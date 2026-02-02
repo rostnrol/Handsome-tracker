@@ -13,6 +13,8 @@ from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+from services.db_service import save_google_tokens
+
 
 # Конфигурация OAuth2
 SCOPES = ['https://www.googleapis.com/auth/calendar.events']
@@ -100,8 +102,13 @@ def exchange_code_for_tokens(auth_code: str, redirect_uri: str) -> Optional[Dict
         
         credentials = flow.credentials
         
+        # Проверяем наличие refresh_token
+        if not credentials.refresh_token:
+            print(f"[Calendar Service] ВНИМАНИЕ: refresh_token отсутствует в ответе от Google!")
+            print(f"[Calendar Service] Это может произойти, если пользователь уже авторизовал приложение ранее.")
+        
         # Возвращаем данные для сохранения
-        return {
+        tokens_dict = {
             "token": credentials.token,
             "refresh_token": credentials.refresh_token,
             "token_uri": credentials.token_uri,
@@ -109,6 +116,8 @@ def exchange_code_for_tokens(auth_code: str, redirect_uri: str) -> Optional[Dict
             "client_secret": credentials.client_secret,
             "scopes": credentials.scopes
         }
+        print(f"[Calendar Service] Токены успешно получены, refresh_token={'есть' if tokens_dict.get('refresh_token') else 'отсутствует'}")
+        return tokens_dict
     except Exception as e:
         print(f"[Calendar Service] Ошибка при обмене кода на токены: {e}")
         return None
@@ -117,6 +126,7 @@ def exchange_code_for_tokens(auth_code: str, redirect_uri: str) -> Optional[Dict
 def get_credentials_from_stored(user_id: int, stored_tokens: Dict) -> Optional[Credentials]:
     """
     Создает объект Credentials из сохраненных токенов.
+    Если токен истек, обновляет его и сохраняет обратно в БД.
     
     Args:
         user_id: ID пользователя Telegram
@@ -137,11 +147,24 @@ def get_credentials_from_stored(user_id: int, stored_tokens: Dict) -> Optional[C
         
         # Обновляем токен если истек
         if creds.expired and creds.refresh_token:
+            print(f"[Calendar Service] Токен истек для user_id={user_id}, обновляем...")
             creds.refresh(Request())
+            
+            # Сохраняем обновленные токены обратно в БД
+            updated_tokens = {
+                "token": creds.token,
+                "refresh_token": creds.refresh_token,  # refresh_token обычно не меняется
+                "token_uri": creds.token_uri,
+                "client_id": creds.client_id,
+                "client_secret": creds.client_secret,
+                "scopes": list(creds.scopes) if creds.scopes else []
+            }
+            save_google_tokens(user_id, updated_tokens)
+            print(f"[Calendar Service] Токены обновлены и сохранены для user_id={user_id}")
         
         return creds
     except Exception as e:
-        print(f"[Calendar Service] Ошибка при создании credentials: {e}")
+        print(f"[Calendar Service] Ошибка при создании credentials для user_id={user_id}: {e}")
         return None
 
 
