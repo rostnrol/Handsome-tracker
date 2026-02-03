@@ -328,6 +328,7 @@ def check_slot_availability(credentials: Credentials, start_dt: datetime, end_dt
 def check_availability(credentials: Credentials, start_dt: datetime, end_dt: datetime) -> bool:
     """
     Проверяет, свободен ли временной слот в календаре.
+    Проверяет ТОЛЬКО пересечение с существующими событиями в указанном интервале.
     
     Args:
         credentials: Объект Credentials для доступа к API
@@ -344,7 +345,7 @@ def check_availability(credentials: Credentials, start_dt: datetime, end_dt: dat
         start_utc = start_dt.astimezone(pytz.utc).isoformat()
         end_utc = end_dt.astimezone(pytz.utc).isoformat()
         
-        # Проверяем свободные слоты
+        # Проверяем свободные слоты ТОЛЬКО для указанного интервала
         freebusy_result = service.freebusy().query(
             body={
                 "timeMin": start_utc,
@@ -359,13 +360,23 @@ def check_availability(credentials: Credentials, start_dt: datetime, end_dt: dat
         busy_slots = primary_calendar.get('busy', [])
         
         # Если есть занятые слоты, проверяем пересечение
+        # Слот занят ТОЛЬКО если существует событие, которое ПЕРЕСЕКАЕТСЯ с нашим интервалом
         if busy_slots:
             for busy_slot in busy_slots:
                 busy_start = datetime.fromisoformat(busy_slot['start'].replace('Z', '+00:00'))
                 busy_end = datetime.fromisoformat(busy_slot['end'].replace('Z', '+00:00'))
                 
-                # Проверяем пересечение
-                if start_dt < busy_end and end_dt > busy_start:
+                # Конвертируем в timezone start_dt для корректного сравнения
+                if busy_start.tzinfo is None:
+                    busy_start = pytz.utc.localize(busy_start)
+                if busy_end.tzinfo is None:
+                    busy_end = pytz.utc.localize(busy_end)
+                busy_start = busy_start.astimezone(start_dt.tzinfo)
+                busy_end = busy_end.astimezone(start_dt.tzinfo)
+                
+                # Проверяем пересечение: слот занят если busy период перекрывает наш интервал
+                # Пересечение: busy_start < end_dt AND busy_end > start_dt
+                if busy_start < end_dt and busy_end > start_dt:
                     return False  # Слот занят
         
         return True  # Слот свободен

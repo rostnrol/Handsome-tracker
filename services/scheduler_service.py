@@ -196,12 +196,13 @@ async def send_evening_recap(bot, chat_id: int, user_timezone: str):
         completed_events = [e for e in events if e.get('summary', '').startswith('✅ ')]
         incomplete_events = [e for e in events if not e.get('summary', '').startswith('✅ ')]
         
-        # Формируем сообщение
+        # Формируем сообщение - только интро
         message_text = "Hey, hope it was a productive day!\n\n"
         
-        # Добавляем выполненные задачи
+        # Добавляем информацию о выполненных задачах в текст
         if completed_events:
             tz = pytz.timezone(user_timezone)
+            message_text += "✅ Completed:\n"
             for event in completed_events:
                 summary = event.get('summary', 'Task')
                 # Убираем "✅ " для отображения
@@ -221,18 +222,26 @@ async def send_evening_recap(bot, chat_id: int, user_timezone: str):
                         pass
                 
                 if time_str:
-                    message_text += f"✅ {time_str} - {summary}\n"
+                    message_text += f"  • {time_str} - {summary}\n"
                 else:
-                    message_text += f"✅ {summary}\n"
-        else:
-            message_text += "No completed tasks yet.\n"
+                    message_text += f"  • {summary}\n"
+            message_text += "\n"
         
-        # Добавляем разделитель и невыполненные задачи
-        message_text += "\nTasks left behind:\n\n"
-        
+        # Добавляем информацию о невыполненных задачах
         if incomplete_events:
-            tz = pytz.timezone(user_timezone)
-            for event in incomplete_events:
+            message_text += "📋 Tasks left behind:\n"
+        else:
+            message_text += "🎉 No uncompleted tasks! Great job!"
+        
+        # Создаем inline-клавиатуру для невыполненных задач
+        # Каждая задача представлена кнопками inline
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        
+        keyboard = []
+        tz = pytz.timezone(user_timezone)
+        for event in incomplete_events:
+            event_id = event.get('id', '')
+            if event_id:
                 summary = event.get('summary', 'Task')
                 start_time = event.get('start_time', '')
                 time_str = ""
@@ -242,28 +251,26 @@ async def send_evening_recap(bot, chat_id: int, user_timezone: str):
                             dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
                             if dt.tzinfo:
                                 dt = dt.astimezone(tz)
-                                time_str = dt.strftime('%H:%M')
+                                time_str = f" {dt.strftime('%H:%M')}"
                     except:
                         pass
                 
-                if time_str:
-                    message_text += f"{time_str} - {summary}\n"
-                else:
-                    message_text += f"{summary}\n"
-        else:
-            message_text += "No uncompleted tasks! 🎉\n"
-        
-        # Создаем inline-клавиатуру для невыполненных задач
-        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-        
-        keyboard = []
-        for event in incomplete_events:
-            event_id = event.get('id', '')
-            if event_id:
-                # Для каждой задачи добавляем две кнопки в ряд
+                # Создаем кнопку с названием задачи (Row 1)
+                # Ограничиваем длину до ~40 символов для кнопки (Telegram лимит 64)
+                task_display = f"{summary}{time_str}"
+                if len(task_display) > 40:
+                    task_display = f"{summary[:35]}{time_str}"
+                
+                # Row 1: Кнопка "✅ Done: Task Name"
+                done_button_text = f"✅ Done: {task_display}"
+                if len(done_button_text) > 64:
+                    done_button_text = f"✅ Done: {summary[:15]}..."
+                
+                # Row 2: Кнопки "➡️ Reschedule" и "❌ Delete"
+                keyboard.append([InlineKeyboardButton(done_button_text, callback_data=f"done_{event_id}")])
                 keyboard.append([
-                    InlineKeyboardButton("✅ Done", callback_data=f"done_{event_id}"),
-                    InlineKeyboardButton("➡️ Reschedule", callback_data=f"reschedule_{event_id}")
+                    InlineKeyboardButton("➡️ Reschedule", callback_data=f"reschedule_{event_id}"),
+                    InlineKeyboardButton("❌ Delete", callback_data=f"cancel_{event_id}")
                 ])
         
         reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None

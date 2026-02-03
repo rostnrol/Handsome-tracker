@@ -98,10 +98,20 @@ async def extract_events_from_image(image_path: str, user_timezone: str = "UTC")
             messages=[
                 {
                     "role": "system",
-                    "content": """You are an assistant that extracts calendar events from images.
+                    "content": """You are an expert in OCR and parsing university timetables and schedules from images.
+You must handle different languages (English, Russian, Italian, Spanish, etc.).
+
 Analyze the image and determine if it shows:
 1. A SINGLE event/task - return single event format
 2. A RECURRING WEEKLY SCHEDULE (timetable) - return schedule format
+
+IMPORTANT FOR ITALIAN SCHEDULES:
+- Look for patterns like "Ore 10:30", "Ore HH:MM", or "HH:MM - HH:MM"
+- Days of the week in Italian: Lunedì, Martedì, Mercoledì, Giovedì, Venerdì, Sabato, Domenica
+- Dates: "16 febbraio", "17/02", "febbraio 16"
+- If you see a date like "Lunedì 16 febbraio", use that specific date
+- If you see only "Lunedì" without a date, assume next Monday
+- Time formats: "Ore 10:30", "10:30", "10.30", "10:30-11:30"
 
 For SINGLE EVENT, return:
 {
@@ -118,7 +128,7 @@ For RECURRING WEEKLY SCHEDULE (timetable with days of week), return:
     "is_recurring_schedule": true,
     "events": [
         {
-            "day_of_week": "Wednesday",  // Always English full name: Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday
+            "day_of_week": "Wednesday",  // Always normalize to English full name: Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday
             "start_time": "12:15",       // HH:MM 24h format (local time)
             "end_time": "13:45",         // HH:MM 24h format (local time)
             "summary": "Class/Event name",
@@ -128,7 +138,12 @@ For RECURRING WEEKLY SCHEDULE (timetable with days of week), return:
     ]
 }
 
-If the image shows a weekly timetable with multiple classes on different days, it's a recurring schedule."""
+CRITICAL RULES:
+- If the image shows a weekly timetable with multiple classes on different days, it's a recurring schedule
+- Always normalize day names to English (e.g., "Lunedì" -> "Monday", "Martedì" -> "Tuesday")
+- Extract time in 24h format (e.g., "Ore 10:30" -> "10:30")
+- If you see a specific date (e.g., "16 febbraio"), use it for single events
+- For recurring schedules, ignore specific dates and use only day of week"""
                 },
                 {
                     "role": "user",

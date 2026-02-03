@@ -782,46 +782,68 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             context.user_data.pop('rescheduling_event_id', None)
             return
         
+        # Получаем credentials
+        stored_tokens = get_google_tokens(chat_id)
+        if not stored_tokens:
+            await update.message.reply_text(
+                "❌ Authorization error. Please reconnect your Google Calendar.",
+                reply_markup=build_main_menu()
+            )
+            context.user_data.pop('waiting_for', None)
+            context.user_data.pop('rescheduling_event_id', None)
+            return
+        
+        credentials = get_credentials_from_stored(chat_id, stored_tokens)
+        if not credentials:
+            await update.message.reply_text(
+                "❌ Authorization error. Please reconnect your Google Calendar.",
+                reply_markup=build_main_menu()
+            )
+            context.user_data.pop('waiting_for', None)
+            context.user_data.pop('rescheduling_event_id', None)
+            return
+        
         try:
-            # Парсим время
-            if ':' not in text:
-                raise ValueError("Invalid time format")
+            # Используем AI для парсинга естественного языка (например, "Tomorrow 15:00", "Friday 10am")
+            user_timezone = get_user_timezone(chat_id) or DEFAULT_TZ
+            ai_parsed = await parse_with_ai(text, user_timezone)
             
-            parts = text.split(':')
-            if len(parts) != 2:
-                raise ValueError("Invalid time format")
+            if not ai_parsed or not ai_parsed.get("is_task", True):
+                # Если AI не смог распарсить, пробуем простой формат HH:MM
+                if ':' in text:
+                    parts = text.split(':')
+                    if len(parts) == 2:
+                        hour = int(parts[0].strip())
+                        minute = int(parts[1].strip())
+                        if 0 <= hour <= 23 and 0 <= minute <= 59:
+                            # Используем завтра с указанным временем
+                            tz = pytz.timezone(user_timezone)
+                            now_local = datetime.now(tz)
+                            tomorrow = now_local + timedelta(days=1)
+                            new_start_dt = tomorrow.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                            new_start_dt = tz.localize(new_start_dt) if new_start_dt.tzinfo is None else new_start_dt
+                        else:
+                            raise ValueError("Invalid time range")
+                    else:
+                        raise ValueError("Invalid time format")
+                else:
+                    raise ValueError("Invalid time format")
+            else:
+                # Используем время из AI парсинга
+                start_dt_str = ai_parsed.get("start_time")
+                if not start_dt_str:
+                    raise ValueError("Could not parse time from input")
+                
+                start_dt = datetime.fromisoformat(start_dt_str.replace("Z", "+00:00"))
+                if start_dt.tzinfo is None:
+                    start_dt = pytz.utc.localize(start_dt)
+                
+                # Конвертируем в локальный timezone
+                tz = pytz.timezone(user_timezone)
+                new_start_dt = start_dt.astimezone(tz)
             
-            hour = int(parts[0].strip())
-            minute = int(parts[1].strip())
-            
-            if not (0 <= hour <= 23 and 0 <= minute <= 59):
-                raise ValueError("Invalid time range")
-            
-            # Получаем credentials
-            stored_tokens = get_google_tokens(chat_id)
-            if not stored_tokens:
-                await update.message.reply_text(
-                    "❌ Authorization error. Please reconnect your Google Calendar.",
-                    reply_markup=build_main_menu()
-                )
-                context.user_data.pop('waiting_for', None)
-                context.user_data.pop('rescheduling_event_id', None)
-                return
-            
-            credentials = get_credentials_from_stored(chat_id, stored_tokens)
-            if not credentials:
-                await update.message.reply_text(
-                    "❌ Authorization error. Please reconnect your Google Calendar.",
-                    reply_markup=build_main_menu()
-                )
-                context.user_data.pop('waiting_for', None)
-                context.user_data.pop('rescheduling_event_id', None)
-                return
-            
-            # Получаем событие
+            # Получаем событие для вычисления длительности
             from googleapiclient.discovery import build
-            from datetime import timedelta
-            
             service = build('calendar', 'v3', credentials=credentials)
             event = service.events().get(calendarId='primary', eventId=event_id).execute()
             
@@ -830,24 +852,16 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             end_str = event['end'].get('dateTime', event['end'].get('date'))
             
             if 'T' in start_str:
-                start_dt = datetime.fromisoformat(start_str.replace('Z', '+00:00'))
-                if start_dt.tzinfo is None:
-                    start_dt = pytz.utc.localize(start_dt)
-                end_dt = datetime.fromisoformat(end_str.replace('Z', '+00:00'))
-                if end_dt.tzinfo is None:
-                    end_dt = pytz.utc.localize(end_dt)
-                duration = end_dt - start_dt
+                orig_start_dt = datetime.fromisoformat(start_str.replace('Z', '+00:00'))
+                if orig_start_dt.tzinfo is None:
+                    orig_start_dt = pytz.utc.localize(orig_start_dt)
+                orig_end_dt = datetime.fromisoformat(end_str.replace('Z', '+00:00'))
+                if orig_end_dt.tzinfo is None:
+                    orig_end_dt = pytz.utc.localize(orig_end_dt)
+                duration = orig_end_dt - orig_start_dt
             else:
                 duration = timedelta(hours=1)
             
-            # Создаем новое время на завтра
-            user_timezone = get_user_timezone(chat_id) or DEFAULT_TZ
-            tz = pytz.timezone(user_timezone)
-            now_local = datetime.now(tz)
-            tomorrow = now_local + timedelta(days=1)
-            
-            new_start_dt = tomorrow.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            new_start_dt = tz.localize(new_start_dt) if new_start_dt.tzinfo is None else new_start_dt
             new_end_dt = new_start_dt + duration
             
             # Проверяем доступность
@@ -863,8 +877,18 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 if success:
                     task_summary = event.get('summary', 'Task')
                     time_str = new_start_dt.strftime('%H:%M')
+                    date_str = new_start_dt.strftime('%Y-%m-%d')
+                    today_str = datetime.now(tz).strftime('%Y-%m-%d')
+                    
+                    if date_str == today_str:
+                        time_display = f"today at {time_str}"
+                    elif date_str == (datetime.now(tz) + timedelta(days=1)).strftime('%Y-%m-%d'):
+                        time_display = f"tomorrow at {time_str}"
+                    else:
+                        time_display = f"{new_start_dt.strftime('%B %d')} at {time_str}"
+                    
                     await update.message.reply_text(
-                        f"✅ Task moved to tomorrow at {time_str}!",
+                        f"✅ Task moved to {time_display}!",
                         reply_markup=build_main_menu()
                     )
                     track_event(chat_id, "task_rescheduled_manual", {"event_id": event_id})
@@ -882,14 +906,14 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             else:
                 # Слот занят - просим попробовать другое время
                 await update.message.reply_text(
-                    "This time is also busy. Please try another time (HH:MM format):"
+                    "⚠️ This time is also busy. Please try another time (e.g., 'Tomorrow 15:00' or 'Friday 10am'):"
                 )
                 # Оставляем waiting_for, чтобы пользователь мог ввести другое время
                 return
             
-        except (ValueError, IndexError) as e:
+        except (ValueError, IndexError, TypeError) as e:
             await update.message.reply_text(
-                "Invalid time format. Please enter time in HH:MM format (e.g., 14:00):"
+                "❌ Invalid time format. Please enter time in natural language (e.g., 'Tomorrow 15:00', 'Friday 10am') or HH:MM format:"
             )
         except Exception as e:
             print(f"[Bot] Ошибка при ручном переносе задачи: {e}")
@@ -1530,14 +1554,15 @@ async def show_daily_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         completed_events = [e for e in events if e.get('summary', '').startswith('✅ ')]
         incomplete_events = [e for e in events if not e.get('summary', '').startswith('✅ ')]
         
-        # Формируем текст сообщения
-        message_text = "📅 **Mark what you've already done:**\n\n"
+        # Формируем текст сообщения - только интро
+        message_text = "📅 **Here are your tasks for today:**\n\n"
         
-        # Добавляем выполненные задачи
+        # Добавляем информацию о выполненных задачах в текст
         if completed_events:
+            message_text += "✅ Completed:\n"
             for event in completed_events:
                 summary = event.get('summary', 'Task')
-                # Убираем "✅ " для отображения, так как уже есть в тексте
+                # Убираем "✅ " для отображения
                 if summary.startswith('✅ '):
                     summary = summary[2:]
                 # Добавляем время задачи
@@ -1545,20 +1570,26 @@ async def show_daily_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 time_str = ""
                 if start_time:
                     try:
-                        # Парсим время и форматируем
                         if 'T' in start_time:
                             dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
-                            # Форматируем только если есть timezone info и конвертация прошла успешно
                             if dt.tzinfo:
                                 dt = dt.astimezone(pytz.timezone(user_timezone))
                                 time_str = f" {dt.strftime('%H:%M')}"
                     except:
                         pass
-                message_text += f"✅ {summary}{time_str}\n"
+                message_text += f"  • {summary}{time_str}\n"
             message_text += "\n"
         
-        # Если есть невыполненные задачи, добавляем их в клавиатуру
+        # Добавляем информацию о невыполненных задачах
+        if incomplete_events:
+            message_text += "📋 Tasks to complete:\n"
+        else:
+            message_text += "🎉 All tasks completed! Great job!"
+        
+        # Создаем inline-клавиатуру для невыполненных задач
+        # Каждая задача представлена кнопками inline
         keyboard = []
+        tz = pytz.timezone(user_timezone)
         for event in incomplete_events:
             summary = event.get('summary', 'Task')
             event_id = event.get('id', '')
@@ -1568,22 +1599,32 @@ async def show_daily_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 time_str = ""
                 if start_time:
                     try:
-                        # Парсим время и форматируем
                         if 'T' in start_time:
                             dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
-                            # Форматируем только если есть timezone info и конвертация прошла успешно
                             if dt.tzinfo:
-                                dt = dt.astimezone(pytz.timezone(user_timezone))
+                                dt = dt.astimezone(tz)
                                 time_str = f" {dt.strftime('%H:%M')}"
                     except:
                         pass
-                # Ограничиваем длину текста кнопки (Telegram лимит 64 символа)
-                button_text = f"{summary}{time_str}"
-                if len(button_text) > 60:
-                    button_text = f"{summary[:55]}{time_str}"
-                keyboard.append([InlineKeyboardButton(button_text, callback_data=f"done_{event_id}")])
+                
+                # Создаем кнопку с названием задачи (Row 1)
+                task_display = f"{summary}{time_str}"
+                if len(task_display) > 40:
+                    task_display = f"{summary[:35]}{time_str}"
+                
+                # Row 1: Кнопка "✅ Done: Task Name"
+                done_button_text = f"✅ Done: {task_display}"
+                if len(done_button_text) > 64:
+                    done_button_text = f"✅ Done: {summary[:15]}..."
+                
+                # Row 2: Кнопки "➡️ Reschedule" и "❌ Delete"
+                keyboard.append([InlineKeyboardButton(done_button_text, callback_data=f"done_{event_id}")])
+                keyboard.append([
+                    InlineKeyboardButton("➡️ Reschedule", callback_data=f"reschedule_{event_id}"),
+                    InlineKeyboardButton("❌ Delete", callback_data=f"cancel_{event_id}")
+                ])
         
-        # Всегда создаем клавиатуру, даже если пустая (чтобы избежать ошибки "Inline keyboard expected")
+        # Всегда создаем клавиатуру, даже если пустая
         reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else InlineKeyboardMarkup([])
         
         await update.message.reply_text(
@@ -1794,100 +1835,117 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             success = mark_event_done(credentials, event_id, event_title)
             
             if success:
-                # Проверяем, является ли это сообщение со списком задач
+                # Обновляем UI на месте - удаляем строки с кнопками для этой задачи и обновляем текст
                 message_text = query.message.text or ""
-                is_tasks_list = "Mark what you've already done" in message_text or "Tasks for Today" in message_text
                 
-                if is_tasks_list:
-                    # Если это список задач, обновляем весь список
+                # Определяем тип сообщения
+                is_evening_recap = "hope it was a productive day" in message_text
+                is_tasks_today = "Here are your tasks" in message_text or "Mark what you've already done" in message_text
+                
+                if is_evening_recap or is_tasks_today:
+                    # Получаем обновленный список событий
                     user_timezone = get_user_timezone(chat_id) or DEFAULT_TZ
                     events = get_today_events(credentials, user_timezone)
-                    
-                    # Разделяем выполненные и невыполненные задачи
                     completed_events = [e for e in events if e.get('summary', '').startswith('✅ ')]
                     incomplete_events = [e for e in events if not e.get('summary', '').startswith('✅ ')]
                     
-                    # Формируем новый текст сообщения
-                    new_message_text = "📅 **Mark what you've already done:**\n\n"
+                    # Пересоздаем текст сообщения
+                    if is_evening_recap:
+                        new_message_text = "Hey, hope it was a productive day!\n\n"
+                    else:
+                        new_message_text = "📅 **Here are your tasks for today:**\n\n"
                     
                     # Добавляем выполненные задачи
                     if completed_events:
+                        tz = pytz.timezone(user_timezone)
+                        new_message_text += "✅ Completed:\n"
                         for event in completed_events:
                             summary = event.get('summary', 'Task')
                             if summary.startswith('✅ '):
                                 summary = summary[2:]
-                            # Добавляем время задачи
                             start_time = event.get('start_time', '')
                             time_str = ""
                             if start_time:
                                 try:
                                     if 'T' in start_time:
                                         dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
-                                        # Форматируем только если есть timezone info и конвертация прошла успешно
                                         if dt.tzinfo:
-                                            dt = dt.astimezone(pytz.timezone(user_timezone))
+                                            dt = dt.astimezone(tz)
                                             time_str = f" {dt.strftime('%H:%M')}"
                                 except:
                                     pass
-                            new_message_text += f"✅ {summary}{time_str}\n"
+                            new_message_text += f"  • {summary}{time_str}\n"
                         new_message_text += "\n"
                     
-                    # Создаем новую клавиатуру для невыполненных задач
+                    # Добавляем информацию о невыполненных задачах
+                    if incomplete_events:
+                        if is_evening_recap:
+                            new_message_text += "📋 Tasks left behind:\n"
+                        else:
+                            new_message_text += "📋 Tasks to complete:\n"
+                    else:
+                        new_message_text += "🎉 All tasks completed! Great job!"
+                    
+                    # Пересоздаем клавиатуру для оставшихся задач
                     new_keyboard = []
+                    tz = pytz.timezone(user_timezone)
                     for event in incomplete_events:
                         summary = event.get('summary', 'Task')
                         event_id_item = event.get('id', '')
                         if event_id_item:
-                            # Добавляем время к тексту кнопки
                             start_time = event.get('start_time', '')
                             time_str = ""
                             if start_time:
                                 try:
                                     if 'T' in start_time:
                                         dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
-                                        # Форматируем только если есть timezone info и конвертация прошла успешно
                                         if dt.tzinfo:
-                                            dt = dt.astimezone(pytz.timezone(user_timezone))
+                                            dt = dt.astimezone(tz)
                                             time_str = f" {dt.strftime('%H:%M')}"
                                 except:
                                     pass
-                            button_text = f"{summary}{time_str}"
-                            if len(button_text) > 60:
-                                button_text = f"{summary[:55]}{time_str}"
-                            new_keyboard.append([InlineKeyboardButton(button_text, callback_data=f"done_{event_id_item}")])
+                            
+                            task_display = f"{summary}{time_str}"
+                            if len(task_display) > 40:
+                                task_display = f"{summary[:35]}{time_str}"
+                            
+                            done_button_text = f"✅ Done: {task_display}"
+                            if len(done_button_text) > 64:
+                                done_button_text = f"✅ Done: {summary[:15]}..."
+                            
+                            new_keyboard.append([InlineKeyboardButton(done_button_text, callback_data=f"done_{event_id_item}")])
+                            new_keyboard.append([
+                                InlineKeyboardButton("➡️ Reschedule", callback_data=f"reschedule_{event_id_item}"),
+                                InlineKeyboardButton("❌ Delete", callback_data=f"cancel_{event_id_item}")
+                            ])
                     
-                    # Всегда создаем клавиатуру, даже если пустая (чтобы избежать ошибки "Inline keyboard expected")
                     new_markup = InlineKeyboardMarkup(new_keyboard) if new_keyboard else InlineKeyboardMarkup([])
-                    
                     await query.edit_message_text(
                         new_message_text,
                         reply_markup=new_markup,
-                        parse_mode='Markdown'
+                        parse_mode='Markdown' if "**" in new_message_text else None
                     )
                 else:
-                    # Если это не список задач (например, вечерняя сводка), просто обновляем кнопку
+                    # Для других типов сообщений просто удаляем кнопки задачи
                     inline_keyboard = query.message.reply_markup.inline_keyboard if query.message.reply_markup else []
-                    
                     new_keyboard = []
                     for row in inline_keyboard:
-                        new_row = []
+                        should_skip = False
                         for button in row:
-                            if button.callback_data == callback_data:
-                                # Изменяем кнопку: добавляем "✅" к тексту
-                                button_text = button.text
-                                if not button_text.startswith('✅ '):
-                                    button_text = f"✅ {button_text}"
-                                new_row.append(InlineKeyboardButton(button_text, callback_data=f"already_done_{event_id}"))
-                            else:
-                                new_row.append(button)
-                        if new_row:
-                            new_keyboard.append(new_row)
+                            if (button.callback_data == callback_data or
+                                button.callback_data == f"reschedule_{event_id}" or
+                                button.callback_data == f"cancel_{event_id}" or
+                                button.callback_data == f"reschedule_manual_{event_id}" or
+                                (button.callback_data.startswith(f"confirm_move_{event_id}|") or 
+                                 button.callback_data.startswith(f"confirm_move_{event_id}_"))):
+                                should_skip = True
+                                break
+                        if not should_skip:
+                            new_keyboard.append(row)
                     
-                    # Всегда создаем клавиатуру, даже если пустая (чтобы избежать ошибки "Inline keyboard expected")
-                    new_markup = InlineKeyboardMarkup(new_keyboard) if new_keyboard else InlineKeyboardMarkup([])
+                    new_markup = InlineKeyboardMarkup(new_keyboard) if new_keyboard else None
                     await query.edit_message_reply_markup(reply_markup=new_markup)
                 
-                # Показываем визуальную обратную связь (вызываем только один раз)
                 await query.answer("✅ Task marked as completed!")
                 track_event(chat_id, "task_marked_done", {"event_id": event_id})
             else:
@@ -2019,8 +2077,14 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data['waiting_for'] = 'reschedule_time'
         
         await query.answer("")
+        # Обновляем сообщение на месте
+        message_text = query.message.text or ""
+        if "Enter day and time" not in message_text:
+            message_text += "\n\n✏️ Enter day and time (e.g., 'Tomorrow 15:00' or 'Friday 10am'):"
+        
         await query.edit_message_text(
-            "Please enter the time in HH:MM format (e.g., 14:00):"
+            message_text,
+            reply_markup=query.message.reply_markup  # Сохраняем существующую клавиатуру
         )
     
     # Обработка переноса задачи (reschedule)
@@ -2137,40 +2201,93 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 # Ищем следующий свободный слот
                 next_free_slot = find_next_free_slot(credentials, start_dt, duration_minutes)
                 
+                # Обновляем UI на месте - меняем кнопку reschedule на кнопку выбора времени
+                # ВАЖНО: Сохраняем кнопку "Done", чтобы пользователь мог отметить задачу как выполненную
+                inline_keyboard = query.message.reply_markup.inline_keyboard if query.message.reply_markup else []
+                new_keyboard = []
+                done_button = None  # Сохраняем кнопку "Done" для этой задачи
+                
+                for row in inline_keyboard:
+                    new_row = []
+                    for button in row:
+                        if button.callback_data == callback_data:
+                            # Заменяем кнопку Reschedule на кнопку выбора времени
+                            if next_free_slot:
+                                new_time_str = next_free_slot.strftime('%H:%M')
+                                timestamp_str = str(int(next_free_slot.timestamp()))
+                                callback_data_confirm = f"confirm_move_{event_id}|{timestamp_str}"
+                                # Создаем новую строку с кнопками
+                                new_row.append(InlineKeyboardButton(f"✅ Move to {new_time_str}", callback_data=callback_data_confirm))
+                            else:
+                                new_row.append(InlineKeyboardButton("⚠️ Busy. Pick Time", callback_data=f"reschedule_manual_{event_id}"))
+                        elif button.callback_data == f"done_{event_id}":
+                            # Сохраняем кнопку "Done" - она должна остаться
+                            done_button = button
+                            new_row.append(button)  # Добавляем кнопку "Done" в текущую строку
+                        elif (button.callback_data == f"cancel_{event_id}" or
+                              button.callback_data == f"reschedule_manual_{event_id}" or
+                              (button.callback_data.startswith(f"confirm_move_{event_id}|") or 
+                               button.callback_data.startswith(f"confirm_move_{event_id}_"))):
+                            # Пропускаем только кнопки reschedule/cancel, но НЕ "Done"
+                            continue
+                        else:
+                            new_row.append(button)
+                    if new_row:
+                        new_keyboard.append(new_row)
+                
+                # Если кнопка "Done" не была найдена в существующих строках, добавляем её
+                # (на случай, если структура клавиатуры изменилась)
+                if done_button is None:
+                    # Ищем кнопку "Done" в исходной клавиатуре
+                    for row in inline_keyboard:
+                        for button in row:
+                            if button.callback_data == f"done_{event_id}":
+                                done_button = button
+                                break
+                        if done_button:
+                            break
+                    
+                    # Если нашли, добавляем её в начало новой клавиатуры
+                    if done_button:
+                        new_keyboard.insert(0, [done_button])
+                
+                # Если нашли свободный слот, добавляем дополнительные кнопки
                 if next_free_slot:
-                    # Найден свободный слот - предлагаем его
                     new_time_str = next_free_slot.strftime('%H:%M')
-                    # Сохраняем timestamp для подтверждения
                     timestamp_str = str(int(next_free_slot.timestamp()))
-                    # Используем | как разделитель, так как event_id может содержать underscores
                     callback_data_confirm = f"confirm_move_{event_id}|{timestamp_str}"
                     
-                    keyboard = [
-                        [InlineKeyboardButton(f"✅ Yes, move to {new_time_str}", callback_data=callback_data_confirm)],
-                        [InlineKeyboardButton("✏️ No, enter manually", callback_data=f"reschedule_manual_{event_id}")],
-                        [InlineKeyboardButton("❌ Cancel task", callback_data=f"cancel_{event_id}")]
+                    # Добавляем строку с опциями
+                    options_row = [
+                        InlineKeyboardButton("✏️ Enter Manually", callback_data=f"reschedule_manual_{event_id}"),
+                        InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{event_id}")
                     ]
-                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    new_keyboard.append(options_row)
                     
-                    await query.edit_message_text(
-                        f"⚠️ Slot at {original_time_str} tomorrow is busy. But I found a free slot at **{new_time_str}**. Move there?",
-                        reply_markup=reply_markup,
-                        parse_mode='Markdown'
-                    )
-                    await query.answer("")
+                    # Обновляем текст сообщения
+                    message_text = query.message.text or ""
+                    if f"⚠️ Slot at {original_time_str}" not in message_text:
+                        message_text += f"\n\n⚠️ Slot at {original_time_str} is busy. Found free slot at {new_time_str}."
                 else:
-                    # Слот не найден - просим выбрать время вручную
-                    keyboard = [
-                        [InlineKeyboardButton("✏️ Enter Manually", callback_data=f"reschedule_manual_{event_id}")],
-                        [InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{event_id}")]
+                    # Добавляем кнопки для ручного ввода
+                    options_row = [
+                        InlineKeyboardButton("✏️ Enter Manually", callback_data=f"reschedule_manual_{event_id}"),
+                        InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{event_id}")
                     ]
-                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    new_keyboard.append(options_row)
                     
-                    await query.edit_message_text(
-                        "Tomorrow looks fully booked. Please choose a time.",
-                        reply_markup=reply_markup
-                    )
-                    await query.answer("")
+                    # Обновляем текст сообщения
+                    message_text = query.message.text or ""
+                    if "Tomorrow looks fully booked" not in message_text:
+                        message_text += f"\n\n⚠️ Slot at {original_time_str} is busy. Please choose another time."
+                
+                new_markup = InlineKeyboardMarkup(new_keyboard) if new_keyboard else None
+                await query.edit_message_text(
+                    message_text,
+                    reply_markup=new_markup,
+                    parse_mode='Markdown' if "**" in message_text else None
+                )
+                await query.answer("")
                 
         except Exception as e:
             print(f"[Bot] Ошибка при переносе задачи: {e}")
