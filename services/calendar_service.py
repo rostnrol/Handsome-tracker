@@ -309,7 +309,7 @@ def mark_event_done(credentials: Credentials, event_id: str, event_title: str) -
         return False
 
 
-def check_slot_availability(credentials: Credentials, start_dt: datetime, end_dt: datetime) -> bool:
+def check_slot_availability(credentials: Credentials, start_dt: datetime, end_dt: datetime, exclude_event_id: Optional[str] = None) -> bool:
     """
     Проверяет, свободен ли временной слот в календаре.
     Alias для check_availability для обратной совместимости.
@@ -318,14 +318,15 @@ def check_slot_availability(credentials: Credentials, start_dt: datetime, end_dt
         credentials: Объект Credentials для доступа к API
         start_dt: Время начала (datetime с timezone)
         end_dt: Время окончания (datetime с timezone)
+        exclude_event_id: ID события, которое нужно исключить из проверки
     
     Returns:
         True если слот свободен, False если занят
     """
-    return check_availability(credentials, start_dt, end_dt)
+    return check_availability(credentials, start_dt, end_dt, exclude_event_id)
 
 
-def check_availability(credentials: Credentials, start_dt: datetime, end_dt: datetime) -> bool:
+def check_availability(credentials: Credentials, start_dt: datetime, end_dt: datetime, exclude_event_id: Optional[str] = None) -> bool:
     """
     Проверяет, свободен ли временной слот в календаре.
     Проверяет ТОЛЬКО пересечение с существующими событиями в указанном интервале.
@@ -334,6 +335,7 @@ def check_availability(credentials: Credentials, start_dt: datetime, end_dt: dat
         credentials: Объект Credentials для доступа к API
         start_dt: Время начала (datetime с timezone)
         end_dt: Время окончания (datetime с timezone)
+        exclude_event_id: ID события, которое нужно исключить из проверки (например, при переносе)
     
     Returns:
         True если слот свободен, False если занят
@@ -344,6 +346,25 @@ def check_availability(credentials: Credentials, start_dt: datetime, end_dt: dat
         # Конвертируем в UTC для API
         start_utc = start_dt.astimezone(pytz.utc).isoformat()
         end_utc = end_dt.astimezone(pytz.utc).isoformat()
+        
+        # Если нужно исключить событие, получаем его данные для фильтрации
+        exclude_event_times = None
+        if exclude_event_id:
+            try:
+                exclude_event = service.events().get(calendarId='primary', eventId=exclude_event_id).execute()
+                exclude_start_str = exclude_event['start'].get('dateTime', exclude_event['start'].get('date'))
+                exclude_end_str = exclude_event['end'].get('dateTime', exclude_event['end'].get('date'))
+                
+                if 'T' in exclude_start_str:
+                    exclude_start = datetime.fromisoformat(exclude_start_str.replace('Z', '+00:00'))
+                    exclude_end = datetime.fromisoformat(exclude_end_str.replace('Z', '+00:00'))
+                    if exclude_start.tzinfo is None:
+                        exclude_start = pytz.utc.localize(exclude_start)
+                    if exclude_end.tzinfo is None:
+                        exclude_end = pytz.utc.localize(exclude_end)
+                    exclude_event_times = (exclude_start.astimezone(start_dt.tzinfo), exclude_end.astimezone(start_dt.tzinfo))
+            except Exception as e:
+                print(f"[Calendar Service] Не удалось получить событие для исключения {exclude_event_id}: {e}")
         
         # Проверяем свободные слоты ТОЛЬКО для указанного интервала
         freebusy_result = service.freebusy().query(
@@ -374,10 +395,20 @@ def check_availability(credentials: Credentials, start_dt: datetime, end_dt: dat
                 busy_start = busy_start.astimezone(start_dt.tzinfo)
                 busy_end = busy_end.astimezone(start_dt.tzinfo)
                 
+                # Пропускаем исключенное событие (если оно совпадает по времени)
+                if exclude_event_times:
+                    exclude_start, exclude_end = exclude_event_times
+                    # Если busy слот точно совпадает с исключенным событием, пропускаем его
+                    if (abs((busy_start - exclude_start).total_seconds()) < 1 and 
+                        abs((busy_end - exclude_end).total_seconds()) < 1):
+                        continue
+                
                 # Проверяем пересечение: слот занят если busy период перекрывает наш интервал
-                # Пересечение: busy_start < end_dt AND busy_end > start_dt
-                if busy_start < end_dt and busy_end > start_dt:
-                    return False  # Слот занят
+                # Формула пересечения: max(start1, start2) < min(end1, end2)
+                overlap_start = max(busy_start, start_dt)
+                overlap_end = min(busy_end, end_dt)
+                if overlap_start < overlap_end:
+                    return False  # Слот занят (есть пересечение)
         
         return True  # Слот свободен
         
@@ -389,7 +420,7 @@ def check_availability(credentials: Credentials, start_dt: datetime, end_dt: dat
         return False  # В случае ошибки считаем, что слот занят
 
 
-def find_next_free_slot(credentials: Credentials, start_dt: datetime, duration_minutes: int = 30) -> Optional[datetime]:
+def find_next_free_slot(credentials: Credentials, start_dt: datetime, duration_minutes: int = 30, exclude_event_id: Optional[str] = None) -> Optional[datetime]:
     """
     Находит следующий свободный слот, начиная с указанного времени.
     Проверяет доступность в 30-минутных интервалах в течение следующих 12 часов.
@@ -398,6 +429,7 @@ def find_next_free_slot(credentials: Credentials, start_dt: datetime, duration_m
         credentials: Объект Credentials для доступа к API
         start_dt: Время начала поиска (datetime с timezone)
         duration_minutes: Длительность слота в минутах (по умолчанию 30)
+        exclude_event_id: ID события, которое нужно исключить из проверки (например, при переносе)
     
     Returns:
         Первый найденный свободный datetime или None, если ничего не найдено
@@ -427,6 +459,25 @@ def find_next_free_slot(credentials: Credentials, start_dt: datetime, duration_m
         primary_calendar = calendars.get('primary', {})
         busy_slots = primary_calendar.get('busy', [])
         
+        # Если нужно исключить событие, получаем его данные для фильтрации
+        exclude_event_times = None
+        if exclude_event_id:
+            try:
+                exclude_event = service.events().get(calendarId='primary', eventId=exclude_event_id).execute()
+                exclude_start_str = exclude_event['start'].get('dateTime', exclude_event['start'].get('date'))
+                exclude_end_str = exclude_event['end'].get('dateTime', exclude_event['end'].get('date'))
+                
+                if 'T' in exclude_start_str:
+                    exclude_start = datetime.fromisoformat(exclude_start_str.replace('Z', '+00:00'))
+                    exclude_end = datetime.fromisoformat(exclude_end_str.replace('Z', '+00:00'))
+                    if exclude_start.tzinfo is None:
+                        exclude_start = pytz.utc.localize(exclude_start)
+                    if exclude_end.tzinfo is None:
+                        exclude_end = pytz.utc.localize(exclude_end)
+                    exclude_event_times = (exclude_start.astimezone(start_dt.tzinfo), exclude_end.astimezone(start_dt.tzinfo))
+            except Exception as e:
+                print(f"[Calendar Service] Не удалось получить событие для исключения {exclude_event_id}: {e}")
+        
         # Конвертируем занятые слоты в datetime объекты
         busy_periods = []
         for busy_slot in busy_slots:
@@ -439,6 +490,15 @@ def find_next_free_slot(credentials: Credentials, start_dt: datetime, duration_m
                 busy_end = pytz.utc.localize(busy_end)
             busy_start = busy_start.astimezone(start_dt.tzinfo)
             busy_end = busy_end.astimezone(start_dt.tzinfo)
+            
+            # Пропускаем исключенное событие (если оно совпадает по времени)
+            if exclude_event_times:
+                exclude_start, exclude_end = exclude_event_times
+                # Если busy слот точно совпадает с исключенным событием, пропускаем его
+                if (abs((busy_start - exclude_start).total_seconds()) < 1 and 
+                    abs((busy_end - exclude_end).total_seconds()) < 1):
+                    continue
+            
             busy_periods.append((busy_start, busy_end))
         
         # Сортируем занятые периоды по времени начала

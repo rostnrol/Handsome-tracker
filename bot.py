@@ -518,9 +518,6 @@ async def finish_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Генерируем URL авторизации с chat_id в state
     auth_url = get_authorization_url(chat_id, redirect_uri)
     
-    keyboard = [[KeyboardButton("🔗 Connect Google Calendar")]]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
-    
     user_name = get_user_name(chat_id)
     greeting = f"Perfect, {user_name}! ✅" if user_name else "Perfect! ✅"
     
@@ -529,7 +526,6 @@ async def finish_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "To get started, connect your Google Calendar:\n\n"
         f'<a href="{auth_url}">🔗 Connect Google Calendar</a>\n\n'
         "Click the link above to authorize. You'll be redirected back automatically.",
-        reply_markup=reply_markup,
         parse_mode='HTML'
     )
     
@@ -864,8 +860,8 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             
             new_end_dt = new_start_dt + duration
             
-            # Проверяем доступность
-            is_available = check_availability(credentials, new_start_dt, new_end_dt)
+            # Проверяем доступность (исключаем само событие из проверки)
+            is_available = check_availability(credentials, new_start_dt, new_end_dt, exclude_event_id=event_id)
             
             if is_available:
                 # Слот свободен - переносим событие
@@ -1574,10 +1570,10 @@ async def show_daily_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
                             if dt.tzinfo:
                                 dt = dt.astimezone(pytz.timezone(user_timezone))
-                                time_str = f" {dt.strftime('%H:%M')}"
+                                time_str = dt.strftime('%H:%M')
                     except:
                         pass
-                message_text += f"  • {summary}{time_str}\n"
+                message_text += f"  • {summary} {time_str}\n" if time_str else f"  • {summary}\n"
             message_text += "\n"
         
         # Добавляем информацию о невыполненных задачах
@@ -1587,14 +1583,14 @@ async def show_daily_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message_text += "🎉 All tasks completed! Great job!"
         
         # Создаем inline-клавиатуру для невыполненных задач
-        # Каждая задача представлена кнопками inline
+        # Каждая задача представлена 2 строками: метка + 3 кнопки действий
         keyboard = []
         tz = pytz.timezone(user_timezone)
         for event in incomplete_events:
             summary = event.get('summary', 'Task')
             event_id = event.get('id', '')
             if event_id:
-                # Добавляем время к тексту кнопки
+                # Добавляем время к тексту метки
                 start_time = event.get('start_time', '')
                 time_str = ""
                 if start_time:
@@ -1603,25 +1599,29 @@ async def show_daily_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
                             if dt.tzinfo:
                                 dt = dt.astimezone(tz)
-                                time_str = f" {dt.strftime('%H:%M')}"
+                                time_str = dt.strftime('%H:%M')
                     except:
                         pass
                 
-                # Создаем кнопку с названием задачи (Row 1)
-                task_display = f"{summary}{time_str}"
-                if len(task_display) > 40:
-                    task_display = f"{summary[:35]}{time_str}"
+                # Row 1: Метка с названием задачи (без эмодзи, чистый текст)
+                # Формат: "HH:MM Task Name" или "Task Name" если нет времени
+                if time_str:
+                    label_text = f"{time_str} {summary}"
+                else:
+                    label_text = summary
                 
-                # Row 1: Кнопка "✅ Done: Task Name"
-                done_button_text = f"✅ Done: {task_display}"
-                if len(done_button_text) > 64:
-                    done_button_text = f"✅ Done: {summary[:15]}..."
+                # Ограничиваем длину до 64 символов (Telegram лимит)
+                if len(label_text) > 64:
+                    label_text = f"{time_str} {summary[:50]}" if time_str else summary[:64]
                 
-                # Row 2: Кнопки "➡️ Reschedule" и "❌ Delete"
-                keyboard.append([InlineKeyboardButton(done_button_text, callback_data=f"done_{event_id}")])
+                # Row 1: Label button (callback_data='ignore' - неактивная кнопка)
+                keyboard.append([InlineKeyboardButton(label_text, callback_data='ignore')])
+                
+                # Row 2: Три кнопки действий
                 keyboard.append([
+                    InlineKeyboardButton("✅ Done", callback_data=f"done_{event_id}"),
                     InlineKeyboardButton("➡️ Reschedule", callback_data=f"reschedule_{event_id}"),
-                    InlineKeyboardButton("❌ Delete", callback_data=f"cancel_{event_id}")
+                    InlineKeyboardButton("❌ Delete", callback_data=f"delete_{event_id}")
                 ])
         
         # Всегда создаем клавиатуру, даже если пустая
@@ -1649,6 +1649,11 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     
     chat_id = query.message.chat_id
     callback_data = query.data
+    
+    # Обработка игнорируемых кнопок (label buttons)
+    if callback_data == 'ignore':
+        await query.answer("")  # Тихий ответ, чтобы убрать loading
+        return
     
     # Обработка настроек (не требуют авторизации Google Calendar)
     if callback_data == "set_name":
@@ -1707,6 +1712,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         not callback_data.startswith("reschedule_") and
         not callback_data.startswith("confirm_move_") and
         not callback_data.startswith("cancel_") and
+        not callback_data.startswith("delete_") and
         callback_data != "reschedule_leftovers"):
         await query.answer("")  # Убираем дублирование текста кнопки для других callback
     
@@ -1871,10 +1877,10 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                                         dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
                                         if dt.tzinfo:
                                             dt = dt.astimezone(tz)
-                                            time_str = f" {dt.strftime('%H:%M')}"
+                                            time_str = dt.strftime('%H:%M')
                                 except:
                                     pass
-                            new_message_text += f"  • {summary}{time_str}\n"
+                            new_message_text += f"  • {summary} {time_str}\n" if time_str else f"  • {summary}\n"
                         new_message_text += "\n"
                     
                     # Добавляем информацию о невыполненных задачах
@@ -1901,22 +1907,26 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                                         dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
                                         if dt.tzinfo:
                                             dt = dt.astimezone(tz)
-                                            time_str = f" {dt.strftime('%H:%M')}"
+                                            time_str = dt.strftime('%H:%M')
                                 except:
                                     pass
                             
-                            task_display = f"{summary}{time_str}"
-                            if len(task_display) > 40:
-                                task_display = f"{summary[:35]}{time_str}"
+                            # Формируем метку (Row 1)
+                            if time_str:
+                                label_text = f"{time_str} {summary}"
+                            else:
+                                label_text = summary
+                            if len(label_text) > 64:
+                                label_text = f"{time_str} {summary[:50]}" if time_str else summary[:64]
                             
-                            done_button_text = f"✅ Done: {task_display}"
-                            if len(done_button_text) > 64:
-                                done_button_text = f"✅ Done: {summary[:15]}..."
+                            # Row 1: Label button
+                            new_keyboard.append([InlineKeyboardButton(label_text, callback_data='ignore')])
                             
-                            new_keyboard.append([InlineKeyboardButton(done_button_text, callback_data=f"done_{event_id_item}")])
+                            # Row 2: Три кнопки действий
                             new_keyboard.append([
+                                InlineKeyboardButton("✅ Done", callback_data=f"done_{event_id_item}"),
                                 InlineKeyboardButton("➡️ Reschedule", callback_data=f"reschedule_{event_id_item}"),
-                                InlineKeyboardButton("❌ Delete", callback_data=f"cancel_{event_id_item}")
+                                InlineKeyboardButton("❌ Delete", callback_data=f"delete_{event_id_item}")
                             ])
                     
                     new_markup = InlineKeyboardMarkup(new_keyboard) if new_keyboard else InlineKeyboardMarkup([])
@@ -1927,21 +1937,65 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                     )
                 else:
                     # Для других типов сообщений просто удаляем кнопки задачи
+                    # Учитываем структуру: Row 1 (label) + Row 2 (actions)
                     inline_keyboard = query.message.reply_markup.inline_keyboard if query.message.reply_markup else []
                     new_keyboard = []
-                    for row in inline_keyboard:
+                    i = 0
+                    while i < len(inline_keyboard):
+                        row = inline_keyboard[i]
                         should_skip = False
+                        
+                        # Проверяем, есть ли в этой строке кнопки для удаляемой задачи
                         for button in row:
                             if (button.callback_data == callback_data or
                                 button.callback_data == f"reschedule_{event_id}" or
                                 button.callback_data == f"cancel_{event_id}" or
+                                button.callback_data == f"delete_{event_id}" or
                                 button.callback_data == f"reschedule_manual_{event_id}" or
                                 (button.callback_data.startswith(f"confirm_move_{event_id}|") or 
                                  button.callback_data.startswith(f"confirm_move_{event_id}_"))):
                                 should_skip = True
                                 break
-                        if not should_skip:
+                        
+                        if should_skip:
+                            # Если это строка с действиями, проверяем предыдущую строку - это может быть label
+                            if i > 0:
+                                prev_row = inline_keyboard[i - 1]
+                                # Проверяем, является ли предыдущая строка label (одна кнопка с callback_data='ignore')
+                                if (len(prev_row) == 1 and 
+                                    prev_row[0].callback_data == 'ignore'):
+                                    # Удаляем предыдущую строку (label) из new_keyboard, если она была добавлена
+                                    if prev_row in new_keyboard:
+                                        new_keyboard.remove(prev_row)
+                            # Пропускаем текущую строку (actions)
+                            i += 1
+                            continue
+                        else:
+                            # Проверяем, не является ли это label строкой, которая должна быть удалена
+                            # Label строка должна быть удалена, если следующая строка содержит кнопки для этой задачи
+                            if (i < len(inline_keyboard) - 1 and
+                                len(row) == 1 and
+                                row[0].callback_data == 'ignore'):
+                                next_row = inline_keyboard[i + 1]
+                                # Проверяем, содержит ли следующая строка кнопки для удаляемой задачи
+                                next_has_task = False
+                                for button in next_row:
+                                    if (button.callback_data == callback_data or
+                                        button.callback_data == f"reschedule_{event_id}" or
+                                        button.callback_data == f"cancel_{event_id}" or
+                                        button.callback_data == f"delete_{event_id}" or
+                                        button.callback_data == f"reschedule_manual_{event_id}" or
+                                        (button.callback_data.startswith(f"confirm_move_{event_id}|") or 
+                                         button.callback_data.startswith(f"confirm_move_{event_id}_"))):
+                                        next_has_task = True
+                                        break
+                                if next_has_task:
+                                    # Пропускаем label строку, так как следующая строка будет удалена
+                                    i += 1
+                                    continue
+                            
                             new_keyboard.append(row)
+                            i += 1
                     
                     new_markup = InlineKeyboardMarkup(new_keyboard) if new_keyboard else None
                     await query.edit_message_reply_markup(reply_markup=new_markup)
@@ -2025,26 +2079,68 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 success = reschedule_event(credentials, event_id, new_start_utc, new_end_utc)
                 
                 if success:
-                    # Обновляем сообщение: удаляем кнопки для этой задачи
+                    # Обновляем сообщение: удаляем строки с кнопками для этой задачи
+                    # Учитываем структуру: Row 1 (label) + Row 2 (actions)
                     inline_keyboard = query.message.reply_markup.inline_keyboard if query.message.reply_markup else []
                     new_keyboard = []
-                    task_summary = event.get('summary', 'Task')
-                    
-                    for row in inline_keyboard:
-                        new_row = []
+                    i = 0
+                    while i < len(inline_keyboard):
+                        row = inline_keyboard[i]
+                        should_skip = False
+                        
+                        # Проверяем, есть ли в этой строке кнопки для удаляемой задачи
                         for button in row:
                             if (button.callback_data == callback_data or 
                                 button.callback_data == f"done_{event_id}" or 
                                 button.callback_data == f"reschedule_{event_id}" or
+                                button.callback_data == f"cancel_{event_id}" or
+                                button.callback_data == f"delete_{event_id}" or
                                 button.callback_data == f"reschedule_manual_{event_id}" or
                                 (button.callback_data.startswith(f"confirm_move_{event_id}|") or 
                                  button.callback_data.startswith(f"confirm_move_{event_id}_"))):
-                                # Пропускаем кнопки для этой задачи
-                                continue
-                            else:
-                                new_row.append(button)
-                        if new_row:
-                            new_keyboard.append(new_row)
+                                should_skip = True
+                                break
+                        
+                        if should_skip:
+                            # Если это строка с действиями, проверяем предыдущую строку - это может быть label
+                            if i > 0:
+                                prev_row = inline_keyboard[i - 1]
+                                # Проверяем, является ли предыдущая строка label (одна кнопка с callback_data='ignore')
+                                if (len(prev_row) == 1 and 
+                                    prev_row[0].callback_data == 'ignore'):
+                                    # Удаляем предыдущую строку (label) из new_keyboard, если она была добавлена
+                                    if prev_row in new_keyboard:
+                                        new_keyboard.remove(prev_row)
+                            # Пропускаем текущую строку (actions)
+                            i += 1
+                            continue
+                        else:
+                            # Проверяем, не является ли это label строкой, которая должна быть удалена
+                            # Label строка должна быть удалена, если следующая строка содержит кнопки для этой задачи
+                            if (i < len(inline_keyboard) - 1 and
+                                len(row) == 1 and
+                                row[0].callback_data == 'ignore'):
+                                next_row = inline_keyboard[i + 1]
+                                # Проверяем, содержит ли следующая строка кнопки для удаляемой задачи
+                                next_has_task = False
+                                for button in next_row:
+                                    if (button.callback_data == callback_data or 
+                                        button.callback_data == f"done_{event_id}" or 
+                                        button.callback_data == f"reschedule_{event_id}" or
+                                        button.callback_data == f"cancel_{event_id}" or
+                                        button.callback_data == f"delete_{event_id}" or
+                                        button.callback_data == f"reschedule_manual_{event_id}" or
+                                        (button.callback_data.startswith(f"confirm_move_{event_id}|") or 
+                                         button.callback_data.startswith(f"confirm_move_{event_id}_"))):
+                                        next_has_task = True
+                                        break
+                                if next_has_task:
+                                    # Пропускаем label строку, так как следующая строка будет удалена
+                                    i += 1
+                                    continue
+                            
+                            new_keyboard.append(row)
+                            i += 1
                     
                     # Обновляем текст сообщения
                     message_text = query.message.text or ""
@@ -2148,8 +2244,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             # Вычисляем длительность в минутах для find_next_free_slot
             duration_minutes = int(duration.total_seconds() / 60)
             
-            # Проверяем доступность целевого слота
-            is_available = check_slot_availability(credentials, start_dt, new_end_dt)
+            # Проверяем доступность целевого слота (исключаем само событие из проверки)
+            is_available = check_slot_availability(credentials, start_dt, new_end_dt, exclude_event_id=event_id)
             
             if is_available:
                 # Сценарий A: Слот свободен - переносим событие немедленно
@@ -2159,25 +2255,68 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 success = reschedule_event(credentials, event_id, new_start_utc, new_end_utc)
                 
                 if success:
-                    # Обновляем сообщение: удаляем кнопки для этой задачи и добавляем текст
+                    # Обновляем сообщение: удаляем строки с кнопками для этой задачи
+                    # Учитываем структуру: Row 1 (label) + Row 2 (actions)
                     inline_keyboard = query.message.reply_markup.inline_keyboard if query.message.reply_markup else []
                     new_keyboard = []
-                    task_summary = event.get('summary', 'Task')
-                    
-                    for row in inline_keyboard:
-                        new_row = []
+                    i = 0
+                    while i < len(inline_keyboard):
+                        row = inline_keyboard[i]
+                        should_skip = False
+                        
+                        # Проверяем, есть ли в этой строке кнопки для удаляемой задачи
                         for button in row:
                             if (button.callback_data == callback_data or 
                                 button.callback_data == f"done_{event_id}" or
+                                button.callback_data == f"reschedule_{event_id}" or
+                                button.callback_data == f"cancel_{event_id}" or
+                                button.callback_data == f"delete_{event_id}" or
                                 button.callback_data == f"reschedule_manual_{event_id}" or
                                 (button.callback_data.startswith(f"confirm_move_{event_id}|") or 
                                  button.callback_data.startswith(f"confirm_move_{event_id}_"))):
-                                # Пропускаем кнопки для этой задачи
-                                continue
-                            else:
-                                new_row.append(button)
-                        if new_row:
-                            new_keyboard.append(new_row)
+                                should_skip = True
+                                break
+                        
+                        if should_skip:
+                            # Если это строка с действиями, проверяем предыдущую строку - это может быть label
+                            if i > 0:
+                                prev_row = inline_keyboard[i - 1]
+                                # Проверяем, является ли предыдущая строка label (одна кнопка с callback_data='ignore')
+                                if (len(prev_row) == 1 and 
+                                    prev_row[0].callback_data == 'ignore'):
+                                    # Удаляем предыдущую строку (label) из new_keyboard, если она была добавлена
+                                    if prev_row in new_keyboard:
+                                        new_keyboard.remove(prev_row)
+                            # Пропускаем текущую строку (actions)
+                            i += 1
+                            continue
+                        else:
+                            # Проверяем, не является ли это label строкой, которая должна быть удалена
+                            # Label строка должна быть удалена, если следующая строка содержит кнопки для этой задачи
+                            if (i < len(inline_keyboard) - 1 and
+                                len(row) == 1 and
+                                row[0].callback_data == 'ignore'):
+                                next_row = inline_keyboard[i + 1]
+                                # Проверяем, содержит ли следующая строка кнопки для удаляемой задачи
+                                next_has_task = False
+                                for button in next_row:
+                                    if (button.callback_data == callback_data or 
+                                        button.callback_data == f"done_{event_id}" or
+                                        button.callback_data == f"reschedule_{event_id}" or
+                                        button.callback_data == f"cancel_{event_id}" or
+                                        button.callback_data == f"delete_{event_id}" or
+                                        button.callback_data == f"reschedule_manual_{event_id}" or
+                                        (button.callback_data.startswith(f"confirm_move_{event_id}|") or 
+                                         button.callback_data.startswith(f"confirm_move_{event_id}_"))):
+                                        next_has_task = True
+                                        break
+                                if next_has_task:
+                                    # Пропускаем label строку, так как следующая строка будет удалена
+                                    i += 1
+                                    continue
+                            
+                            new_keyboard.append(row)
+                            i += 1
                     
                     # Обновляем текст сообщения
                     message_text = query.message.text or ""
@@ -2198,8 +2337,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 task_summary = event.get('summary', 'Task')
                 original_time_str = start_dt.strftime('%H:%M')
                 
-                # Ищем следующий свободный слот
-                next_free_slot = find_next_free_slot(credentials, start_dt, duration_minutes)
+                # Ищем следующий свободный слот (исключаем само событие из проверки)
+                next_free_slot = find_next_free_slot(credentials, start_dt, duration_minutes, exclude_event_id=event_id)
                 
                 # Обновляем UI на месте - меняем кнопку reschedule на кнопку выбора времени
                 # ВАЖНО: Сохраняем кнопку "Done", чтобы пользователь мог отметить задачу как выполненную
@@ -2225,10 +2364,11 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                             done_button = button
                             new_row.append(button)  # Добавляем кнопку "Done" в текущую строку
                         elif (button.callback_data == f"cancel_{event_id}" or
+                              button.callback_data == f"delete_{event_id}" or
                               button.callback_data == f"reschedule_manual_{event_id}" or
                               (button.callback_data.startswith(f"confirm_move_{event_id}|") or 
                                button.callback_data.startswith(f"confirm_move_{event_id}_"))):
-                            # Пропускаем только кнопки reschedule/cancel, но НЕ "Done"
+                            # Пропускаем только кнопки reschedule/cancel/delete, но НЕ "Done"
                             continue
                         else:
                             new_row.append(button)
@@ -2251,42 +2391,44 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                     if done_button:
                         new_keyboard.insert(0, [done_button])
                 
-                # Если нашли свободный слот, добавляем дополнительные кнопки
+                # НЕ редактируем основное сообщение - отправляем НОВОЕ сообщение
+                # Это сохраняет список задач чистым и видимым
                 if next_free_slot:
                     new_time_str = next_free_slot.strftime('%H:%M')
                     timestamp_str = str(int(next_free_slot.timestamp()))
                     callback_data_confirm = f"confirm_move_{event_id}|{timestamp_str}"
                     
-                    # Добавляем строку с опциями
-                    options_row = [
-                        InlineKeyboardButton("✏️ Enter Manually", callback_data=f"reschedule_manual_{event_id}"),
-                        InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{event_id}")
+                    # Создаем клавиатуру для нового сообщения
+                    keyboard = [
+                        [InlineKeyboardButton(f"✅ Move to {new_time_str}", callback_data=callback_data_confirm)],
+                        [
+                            InlineKeyboardButton("✏️ Enter Manually", callback_data=f"reschedule_manual_{event_id}"),
+                            InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{event_id}")
+                        ]
                     ]
-                    new_keyboard.append(options_row)
+                    reply_markup = InlineKeyboardMarkup(keyboard)
                     
-                    # Обновляем текст сообщения
-                    message_text = query.message.text or ""
-                    if f"⚠️ Slot at {original_time_str}" not in message_text:
-                        message_text += f"\n\n⚠️ Slot at {original_time_str} is busy. Found free slot at {new_time_str}."
+                    # Отправляем НОВОЕ сообщение
+                    await query.message.reply_text(
+                        f"⚠️ Slot at {original_time_str} is busy. Found free slot at {new_time_str}. Move there?",
+                        reply_markup=reply_markup
+                    )
                 else:
-                    # Добавляем кнопки для ручного ввода
-                    options_row = [
-                        InlineKeyboardButton("✏️ Enter Manually", callback_data=f"reschedule_manual_{event_id}"),
-                        InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{event_id}")
+                    # Создаем клавиатуру для нового сообщения
+                    keyboard = [
+                        [
+                            InlineKeyboardButton("✏️ Enter Manually", callback_data=f"reschedule_manual_{event_id}"),
+                            InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{event_id}")
+                        ]
                     ]
-                    new_keyboard.append(options_row)
+                    reply_markup = InlineKeyboardMarkup(keyboard)
                     
-                    # Обновляем текст сообщения
-                    message_text = query.message.text or ""
-                    if "Tomorrow looks fully booked" not in message_text:
-                        message_text += f"\n\n⚠️ Slot at {original_time_str} is busy. Please choose another time."
+                    # Отправляем НОВОЕ сообщение
+                    await query.message.reply_text(
+                        f"⚠️ Slot at {original_time_str} is busy. Please choose another time:",
+                        reply_markup=reply_markup
+                    )
                 
-                new_markup = InlineKeyboardMarkup(new_keyboard) if new_keyboard else None
-                await query.edit_message_text(
-                    message_text,
-                    reply_markup=new_markup,
-                    parse_mode='Markdown' if "**" in message_text else None
-                )
                 await query.answer("")
                 
         except Exception as e:
@@ -2294,7 +2436,97 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             await query.answer("❌ An error occurred. Please try again.", show_alert=True)
             track_event(chat_id, "error", {"error_type": "reschedule_task", "error_message": str(e)[:100]})
     
-    # Обработка отмены задачи
+    # Обработка удаления задачи (delete_)
+    elif callback_data.startswith("delete_"):
+        event_id = callback_data[7:]  # Убираем префикс "delete_"
+        
+        try:
+            success = cancel_event(credentials, event_id)
+            
+            if success:
+                # Обновляем сообщение: удаляем строки с кнопками для этой задачи
+                # Учитываем структуру: Row 1 (label) + Row 2 (actions)
+                inline_keyboard = query.message.reply_markup.inline_keyboard if query.message.reply_markup else []
+                new_keyboard = []
+                i = 0
+                while i < len(inline_keyboard):
+                    row = inline_keyboard[i]
+                    should_skip = False
+                    
+                    # Проверяем, есть ли в этой строке кнопки для удаляемой задачи
+                    for button in row:
+                        if (button.callback_data == callback_data or
+                            button.callback_data == f"done_{event_id}" or 
+                            button.callback_data == f"reschedule_{event_id}" or
+                            button.callback_data == f"cancel_{event_id}" or
+                            button.callback_data == f"delete_{event_id}" or
+                            button.callback_data == f"reschedule_manual_{event_id}" or
+                            (button.callback_data.startswith(f"confirm_move_{event_id}|") or 
+                             button.callback_data.startswith(f"confirm_move_{event_id}_"))):
+                            should_skip = True
+                            break
+                    
+                    if should_skip:
+                        # Если это строка с действиями, проверяем предыдущую строку - это может быть label
+                        if i > 0:
+                            prev_row = inline_keyboard[i - 1]
+                            # Проверяем, является ли предыдущая строка label (одна кнопка с callback_data='ignore')
+                            if (len(prev_row) == 1 and 
+                                prev_row[0].callback_data == 'ignore'):
+                                # Удаляем предыдущую строку (label) из new_keyboard, если она была добавлена
+                                if prev_row in new_keyboard:
+                                    new_keyboard.remove(prev_row)
+                        # Пропускаем текущую строку (actions)
+                        i += 1
+                        continue
+                    else:
+                        # Проверяем, не является ли это label строкой, которая должна быть удалена
+                        # Label строка должна быть удалена, если следующая строка содержит кнопки для этой задачи
+                        if (i < len(inline_keyboard) - 1 and
+                            len(row) == 1 and
+                            row[0].callback_data == 'ignore'):
+                            next_row = inline_keyboard[i + 1]
+                            # Проверяем, содержит ли следующая строка кнопки для удаляемой задачи
+                            next_has_task = False
+                            for button in next_row:
+                                if (button.callback_data == callback_data or
+                                    button.callback_data == f"done_{event_id}" or 
+                                    button.callback_data == f"reschedule_{event_id}" or
+                                    button.callback_data == f"cancel_{event_id}" or
+                                    button.callback_data == f"delete_{event_id}" or
+                                    button.callback_data == f"reschedule_manual_{event_id}" or
+                                    (button.callback_data.startswith(f"confirm_move_{event_id}|") or 
+                                     button.callback_data.startswith(f"confirm_move_{event_id}_"))):
+                                    next_has_task = True
+                                    break
+                            if next_has_task:
+                                # Пропускаем label строку, так как следующая строка будет удалена
+                                i += 1
+                                continue
+                        
+                        new_keyboard.append(row)
+                        i += 1
+                
+                # Обновляем текст сообщения
+                message_text = query.message.text or ""
+                message_text += "\n\n❌ Task deleted."
+                
+                new_markup = InlineKeyboardMarkup(new_keyboard) if new_keyboard else None
+                await query.edit_message_text(
+                    message_text,
+                    reply_markup=new_markup
+                )
+                await query.answer("✅ Task deleted!")
+                track_event(chat_id, "task_deleted", {"event_id": event_id})
+            else:
+                await query.answer("❌ Failed to delete task. Please try again.", show_alert=True)
+                
+        except Exception as e:
+            print(f"[Bot] Ошибка при удалении задачи: {e}")
+            await query.answer("❌ An error occurred. Please try again.", show_alert=True)
+            track_event(chat_id, "error", {"error_type": "delete_task", "error_message": str(e)[:100]})
+    
+    # Обработка отмены задачи (cancel_ - для обратной совместимости)
     elif callback_data.startswith("cancel_"):
         event_id = callback_data[7:]  # Убираем префикс "cancel_"
         
@@ -2302,25 +2534,68 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             success = cancel_event(credentials, event_id)
             
             if success:
-                # Обновляем сообщение: удаляем кнопки для этой задачи
+                # Обновляем сообщение: удаляем строки с кнопками для этой задачи
+                # Учитываем структуру: Row 1 (label) + Row 2 (actions)
                 inline_keyboard = query.message.reply_markup.inline_keyboard if query.message.reply_markup else []
                 new_keyboard = []
-                
-                for row in inline_keyboard:
-                    new_row = []
+                i = 0
+                while i < len(inline_keyboard):
+                    row = inline_keyboard[i]
+                    should_skip = False
+                    
+                    # Проверяем, есть ли в этой строке кнопки для удаляемой задачи
                     for button in row:
                         if (button.callback_data == callback_data or 
                             button.callback_data == f"done_{event_id}" or 
                             button.callback_data == f"reschedule_{event_id}" or
+                            button.callback_data == f"cancel_{event_id}" or
+                            button.callback_data == f"delete_{event_id}" or
                             button.callback_data == f"reschedule_manual_{event_id}" or
                             (button.callback_data.startswith(f"confirm_move_{event_id}|") or 
                              button.callback_data.startswith(f"confirm_move_{event_id}_"))):
-                            # Пропускаем кнопки для этой задачи
-                            continue
-                        else:
-                            new_row.append(button)
-                    if new_row:
-                        new_keyboard.append(new_row)
+                            should_skip = True
+                            break
+                    
+                    if should_skip:
+                        # Если это строка с действиями, проверяем предыдущую строку - это может быть label
+                        if i > 0:
+                            prev_row = inline_keyboard[i - 1]
+                            # Проверяем, является ли предыдущая строка label (одна кнопка с callback_data='ignore')
+                            if (len(prev_row) == 1 and 
+                                prev_row[0].callback_data == 'ignore'):
+                                # Удаляем предыдущую строку (label) из new_keyboard, если она была добавлена
+                                if prev_row in new_keyboard:
+                                    new_keyboard.remove(prev_row)
+                        # Пропускаем текущую строку (actions)
+                        i += 1
+                        continue
+                    else:
+                        # Проверяем, не является ли это label строкой, которая должна быть удалена
+                        # Label строка должна быть удалена, если следующая строка содержит кнопки для этой задачи
+                        if (i < len(inline_keyboard) - 1 and
+                            len(row) == 1 and
+                            row[0].callback_data == 'ignore'):
+                            next_row = inline_keyboard[i + 1]
+                            # Проверяем, содержит ли следующая строка кнопки для удаляемой задачи
+                            next_has_task = False
+                            for button in next_row:
+                                if (button.callback_data == callback_data or 
+                                    button.callback_data == f"done_{event_id}" or 
+                                    button.callback_data == f"reschedule_{event_id}" or
+                                    button.callback_data == f"cancel_{event_id}" or
+                                    button.callback_data == f"delete_{event_id}" or
+                                    button.callback_data == f"reschedule_manual_{event_id}" or
+                                    (button.callback_data.startswith(f"confirm_move_{event_id}|") or 
+                                     button.callback_data.startswith(f"confirm_move_{event_id}_"))):
+                                    next_has_task = True
+                                    break
+                            if next_has_task:
+                                # Пропускаем label строку, так как следующая строка будет удалена
+                                i += 1
+                                continue
+                        
+                        new_keyboard.append(row)
+                        i += 1
                 
                 # Обновляем текст сообщения
                 message_text = query.message.text or ""
