@@ -10,7 +10,7 @@ import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from services.ai_service import generate_morning_briefing
+from services.ai_service import generate_morning_briefing_intro
 from services.calendar_service import get_credentials_from_stored
 from services.db_service import get_google_tokens, get_user_timezone, get_morning_time, get_evening_time
 from googleapiclient.discovery import build
@@ -106,8 +106,45 @@ async def send_morning_briefing(bot, chat_id: int, user_timezone: str):
         # Получаем события на сегодня
         events = get_today_events(credentials, user_timezone)
         
-        # Генерируем брифинг через AI
-        briefing = await generate_morning_briefing(events, user_timezone)
+        # Если нет задач, отправляем специальное сообщение
+        if not events:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="No tasks for today yet. Enjoy your freedom!"
+            )
+            return
+        
+        # Генерируем только вступление через AI
+        intro = await generate_morning_briefing_intro()
+        
+        # Форматируем список задач (Time - Title)
+        tz = pytz.timezone(user_timezone)
+        tasks_list = []
+        for event in events:
+            summary = event.get('summary', 'Task')
+            # Убираем "✅ " если есть (для отображения)
+            if summary.startswith('✅ '):
+                summary = summary[2:]
+            
+            start_time = event.get('start_time', '')
+            time_str = ""
+            if start_time:
+                try:
+                    if 'T' in start_time:
+                        dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+                        if dt.tzinfo:
+                            dt = dt.astimezone(tz)
+                            time_str = dt.strftime('%H:%M')
+                except:
+                    pass
+            
+            if time_str:
+                tasks_list.append(f"{time_str} - {summary}")
+            else:
+                tasks_list.append(summary)
+        
+        # Объединяем вступление и список задач
+        briefing = f"{intro}\n\n" + "\n".join(tasks_list)
         
         # Отправляем брифинг
         await bot.send_message(
@@ -155,39 +192,86 @@ async def send_evening_recap(bot, chat_id: int, user_timezone: str):
         # Получаем события на сегодня
         events = get_today_events(credentials, user_timezone)
         
-        # Фильтруем выполненные (те, что начинаются с "✅")
+        # Разделяем выполненные и невыполненные задачи
+        completed_events = [e for e in events if e.get('summary', '').startswith('✅ ')]
         incomplete_events = [e for e in events if not e.get('summary', '').startswith('✅ ')]
         
-        # Если нет неотмеченных событий, отправляем просто сводку
-        if not incomplete_events:
-            recap = await generate_evening_recap(events, user_timezone)
-            await bot.send_message(
-                chat_id=chat_id,
-                text=recap
-            )
-            return
+        # Формируем сообщение
+        message_text = "Hey, hope it was a productive day!\n\n"
+        
+        # Добавляем выполненные задачи
+        if completed_events:
+            tz = pytz.timezone(user_timezone)
+            for event in completed_events:
+                summary = event.get('summary', 'Task')
+                # Убираем "✅ " для отображения
+                if summary.startswith('✅ '):
+                    summary = summary[2:]
+                
+                start_time = event.get('start_time', '')
+                time_str = ""
+                if start_time:
+                    try:
+                        if 'T' in start_time:
+                            dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+                            if dt.tzinfo:
+                                dt = dt.astimezone(tz)
+                                time_str = dt.strftime('%H:%M')
+                    except:
+                        pass
+                
+                if time_str:
+                    message_text += f"✅ {time_str} - {summary}\n"
+                else:
+                    message_text += f"✅ {summary}\n"
+        else:
+            message_text += "No completed tasks yet.\n"
+        
+        # Добавляем разделитель и невыполненные задачи
+        message_text += "\nTasks left behind:\n\n"
+        
+        if incomplete_events:
+            tz = pytz.timezone(user_timezone)
+            for event in incomplete_events:
+                summary = event.get('summary', 'Task')
+                start_time = event.get('start_time', '')
+                time_str = ""
+                if start_time:
+                    try:
+                        if 'T' in start_time:
+                            dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+                            if dt.tzinfo:
+                                dt = dt.astimezone(tz)
+                                time_str = dt.strftime('%H:%M')
+                    except:
+                        pass
+                
+                if time_str:
+                    message_text += f"{time_str} - {summary}\n"
+                else:
+                    message_text += f"{summary}\n"
+        else:
+            message_text += "No uncompleted tasks! 🎉\n"
         
         # Создаем inline-клавиатуру для невыполненных задач
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
         
         keyboard = []
         for event in incomplete_events:
-            summary = event.get('summary', 'Task')
             event_id = event.get('id', '')
             if event_id:
-                # Ограничиваем длину текста кнопки (Telegram лимит 64 символа)
-                button_text = summary[:60] if len(summary) > 60 else summary
-                keyboard.append([InlineKeyboardButton(button_text, callback_data=f"done_{event_id}")])
-        
-        # Добавляем кнопку для переноса остатка на завтра
-        keyboard.append([InlineKeyboardButton("➡️ Перенести остаток на завтра", callback_data="reschedule_leftovers")])
+                # Для каждой задачи добавляем две кнопки в ряд
+                keyboard.append([
+                    InlineKeyboardButton("✅ Done", callback_data=f"done_{event_id}"),
+                    InlineKeyboardButton("➡️ Reschedule", callback_data=f"reschedule_{event_id}")
+                ])
         
         reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
         
         # Отправляем сообщение с кнопками
         await bot.send_message(
             chat_id=chat_id,
-            text="Как прошел день? Отметь выполненное:",
+            text=message_text,
             reply_markup=reply_markup
         )
     except Exception as e:

@@ -9,7 +9,7 @@ import sqlite3
 import json
 import tempfile
 import time as time_module
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, Dict
 import asyncio
 from aiohttp import web
@@ -36,7 +36,11 @@ from services.calendar_service import (
     get_credentials_from_stored,
     create_event,
     mark_event_done,
-    reschedule_event
+    reschedule_event,
+    check_availability,
+    check_slot_availability,
+    find_next_free_slot,
+    cancel_event
 )
 from services.scheduler_service import get_today_events
 from services.analytics_service import track_event
@@ -378,6 +382,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Трекинг события
     track_event(chat_id, "user_start")
     
+    # Очищаем любые активные состояния (например, ожидание ответа о неделях)
+    # user_data всегда доступен в telegram.ext контекстах
+    context.user_data.pop('state', None)
+    context.user_data.pop('pending_schedule', None)
+    context.user_data.pop('waiting_for', None)
+    
     # Проверяем, прошел ли онбординг
     if is_onboarded(chat_id):
         # Пользователь уже прошел онбординг - показываем меню
@@ -515,10 +525,11 @@ async def finish_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(
         f"{greeting}\n\n"
-        "To get started, connect your Google Calendar:\n"
-        f"{auth_url}\n\n"
+        "To get started, connect your Google Calendar:\n\n"
+        f'<a href="{auth_url}">🔗 Connect Google Calendar</a>\n\n'
         "Click the link above to authorize. You'll be redirected back automatically.",
-        reply_markup=reply_markup
+        reply_markup=reply_markup,
+        parse_mode='HTML'
     )
     
     # Очищаем стадию онбординга, так как авторизация теперь происходит автоматически через callback
@@ -533,6 +544,66 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     chat_id = update.effective_chat.id
     text = update.message.text.strip()
+    
+    # Обработка команд меню (проверяем ПЕРЕД состоянием, чтобы пользователь мог отменить)
+    if text == "⚙️ Settings":
+        # Очищаем состояние расписания, если было
+        context.user_data.pop('state', None)
+        context.user_data.pop('pending_schedule', None)
+        
+        tz = get_user_timezone(chat_id) or DEFAULT_TZ
+        morning_time = get_morning_time(chat_id)
+        evening_time = get_evening_time(chat_id)
+        user_name = get_user_name(chat_id)
+        
+        settings_text = f"⚙️ Settings\n\n"
+        if user_name:
+            settings_text += f"Name: {user_name}\n"
+        settings_text += f"Timezone: {tz}\n"
+        settings_text += f"Morning briefing: {morning_time}\n"
+        settings_text += f"Evening recap: {evening_time}\n\n"
+        settings_text += "Select what you want to change:"
+        
+        keyboard = [
+            [InlineKeyboardButton("✏️ Change Name", callback_data="set_name")],
+            [InlineKeyboardButton("🌍 Change Timezone", callback_data="set_tz")],
+            [InlineKeyboardButton("🌅 Morning Time", callback_data="set_morning")],
+            [InlineKeyboardButton("🌙 Evening Time", callback_data="set_evening")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            settings_text,
+            reply_markup=reply_markup
+        )
+        return
+    
+    if text == "📋 Tasks for Today":
+        # Очищаем состояние расписания, если было
+        context.user_data.pop('state', None)
+        context.user_data.pop('pending_schedule', None)
+        # Показываем задачи на сегодня
+        await show_daily_tasks(update, context)
+        return
+    
+    if text == "📅 Open Google Calendar":
+        # Очищаем состояние расписания, если было
+        context.user_data.pop('state', None)
+        context.user_data.pop('pending_schedule', None)
+        # Отправляем ссылку на Google Calendar сразу без дополнительного сообщения
+        calendar_url = "https://calendar.google.com/calendar"
+        keyboard = [[InlineKeyboardButton("📅 Open Google Calendar", url=calendar_url)]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            "📅",
+            reply_markup=reply_markup
+        )
+        return
+    
+    # Обработка ответа на вопрос о количестве недель для расписания
+    if context.user_data.get('state') == 'WAITING_FOR_WEEKS':
+        await handle_weeks_response(update, context, text)
+        return
     
     # Обработка изменений настроек через callback
     waiting_for = context.user_data.get('waiting_for')
@@ -696,6 +767,137 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text(
                 "Invalid time format. Please enter time in HH:MM format (e.g., 21:00):"
             )
+        return
+    
+    elif waiting_for == 'reschedule_time':
+        # Обработка ручного ввода времени для переноса задачи
+        event_id = context.user_data.get('rescheduling_event_id')
+        if not event_id:
+            await update.message.reply_text(
+                "Error: Event ID not found. Please try rescheduling again.",
+                reply_markup=build_main_menu()
+            )
+            context.user_data.pop('waiting_for', None)
+            context.user_data.pop('rescheduling_event_id', None)
+            return
+        
+        try:
+            # Парсим время
+            if ':' not in text:
+                raise ValueError("Invalid time format")
+            
+            parts = text.split(':')
+            if len(parts) != 2:
+                raise ValueError("Invalid time format")
+            
+            hour = int(parts[0].strip())
+            minute = int(parts[1].strip())
+            
+            if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                raise ValueError("Invalid time range")
+            
+            # Получаем credentials
+            stored_tokens = get_google_tokens(chat_id)
+            if not stored_tokens:
+                await update.message.reply_text(
+                    "❌ Authorization error. Please reconnect your Google Calendar.",
+                    reply_markup=build_main_menu()
+                )
+                context.user_data.pop('waiting_for', None)
+                context.user_data.pop('rescheduling_event_id', None)
+                return
+            
+            credentials = get_credentials_from_stored(chat_id, stored_tokens)
+            if not credentials:
+                await update.message.reply_text(
+                    "❌ Authorization error. Please reconnect your Google Calendar.",
+                    reply_markup=build_main_menu()
+                )
+                context.user_data.pop('waiting_for', None)
+                context.user_data.pop('rescheduling_event_id', None)
+                return
+            
+            # Получаем событие
+            from googleapiclient.discovery import build
+            from datetime import timedelta
+            
+            service = build('calendar', 'v3', credentials=credentials)
+            event = service.events().get(calendarId='primary', eventId=event_id).execute()
+            
+            # Получаем длительность события
+            start_str = event['start'].get('dateTime', event['start'].get('date'))
+            end_str = event['end'].get('dateTime', event['end'].get('date'))
+            
+            if 'T' in start_str:
+                start_dt = datetime.fromisoformat(start_str.replace('Z', '+00:00'))
+                if start_dt.tzinfo is None:
+                    start_dt = pytz.utc.localize(start_dt)
+                end_dt = datetime.fromisoformat(end_str.replace('Z', '+00:00'))
+                if end_dt.tzinfo is None:
+                    end_dt = pytz.utc.localize(end_dt)
+                duration = end_dt - start_dt
+            else:
+                duration = timedelta(hours=1)
+            
+            # Создаем новое время на завтра
+            user_timezone = get_user_timezone(chat_id) or DEFAULT_TZ
+            tz = pytz.timezone(user_timezone)
+            now_local = datetime.now(tz)
+            tomorrow = now_local + timedelta(days=1)
+            
+            new_start_dt = tomorrow.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            new_start_dt = tz.localize(new_start_dt) if new_start_dt.tzinfo is None else new_start_dt
+            new_end_dt = new_start_dt + duration
+            
+            # Проверяем доступность
+            is_available = check_availability(credentials, new_start_dt, new_end_dt)
+            
+            if is_available:
+                # Слот свободен - переносим событие
+                new_start_utc = new_start_dt.astimezone(pytz.utc)
+                new_end_utc = new_end_dt.astimezone(pytz.utc)
+                
+                success = reschedule_event(credentials, event_id, new_start_utc, new_end_utc)
+                
+                if success:
+                    task_summary = event.get('summary', 'Task')
+                    time_str = new_start_dt.strftime('%H:%M')
+                    await update.message.reply_text(
+                        f"✅ Task moved to tomorrow at {time_str}!",
+                        reply_markup=build_main_menu()
+                    )
+                    track_event(chat_id, "task_rescheduled_manual", {"event_id": event_id})
+                    # Очищаем состояние после успешного переноса
+                    context.user_data.pop('waiting_for', None)
+                    context.user_data.pop('rescheduling_event_id', None)
+                else:
+                    await update.message.reply_text(
+                        "❌ Failed to reschedule. Please try again.",
+                        reply_markup=build_main_menu()
+                    )
+                    # Очищаем состояние при ошибке
+                    context.user_data.pop('waiting_for', None)
+                    context.user_data.pop('rescheduling_event_id', None)
+            else:
+                # Слот занят - просим попробовать другое время
+                await update.message.reply_text(
+                    "This time is also busy. Please try another time (HH:MM format):"
+                )
+                # Оставляем waiting_for, чтобы пользователь мог ввести другое время
+                return
+            
+        except (ValueError, IndexError) as e:
+            await update.message.reply_text(
+                "Invalid time format. Please enter time in HH:MM format (e.g., 14:00):"
+            )
+        except Exception as e:
+            print(f"[Bot] Ошибка при ручном переносе задачи: {e}")
+            await update.message.reply_text(
+                "❌ An error occurred. Please try again.",
+                reply_markup=build_main_menu()
+            )
+            context.user_data.pop('waiting_for', None)
+            context.user_data.pop('rescheduling_event_id', None)
         return
     
     # Обработка онбординга
@@ -866,51 +1068,6 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
         return
 
-    # Обработка команд меню
-    if text == "⚙️ Settings":
-        tz = get_user_timezone(chat_id) or DEFAULT_TZ
-        morning_time = get_morning_time(chat_id)
-        evening_time = get_evening_time(chat_id)
-        user_name = get_user_name(chat_id)
-        
-        settings_text = f"⚙️ Settings\n\n"
-        if user_name:
-            settings_text += f"Name: {user_name}\n"
-        settings_text += f"Timezone: {tz}\n"
-        settings_text += f"Morning briefing: {morning_time}\n"
-        settings_text += f"Evening recap: {evening_time}\n\n"
-        settings_text += "Select what you want to change:"
-        
-        keyboard = [
-            [InlineKeyboardButton("✏️ Change Name", callback_data="set_name")],
-            [InlineKeyboardButton("🌍 Change Timezone", callback_data="set_tz")],
-            [InlineKeyboardButton("🌅 Morning Time", callback_data="set_morning")],
-            [InlineKeyboardButton("🌙 Evening Time", callback_data="set_evening")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await update.message.reply_text(
-            settings_text,
-            reply_markup=reply_markup
-        )
-        return
-    
-    if text == "📋 Tasks for Today":
-        # Показываем задачи на сегодня
-        await show_daily_tasks(update, context)
-        return
-    
-    if text == "📅 Open Google Calendar":
-        # Отправляем ссылку на Google Calendar сразу без дополнительного сообщения
-        calendar_url = "https://calendar.google.com/calendar"
-        keyboard = [[InlineKeyboardButton("📅 Open Google Calendar", url=calendar_url)]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(
-            "📅",
-            reply_markup=reply_markup
-        )
-        return
-
     # Обработка обычного текста как задачи
     if not is_onboarded(chat_id):
         await update.message.reply_text(
@@ -1006,14 +1163,253 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
             track_event(chat_id, "error", {"error_type": "image_extraction_failed"})
             return
 
-        # Создаем событие в календаре
-        await create_calendar_event(update, context, event_data, source="photo")
+        # Проверяем, является ли это рекуррентным расписанием
+        if event_data.get("is_recurring_schedule", False):
+            await handle_schedule_import(update, context, event_data, source="photo")
+        else:
+            # Создаем событие в календаре
+            await create_calendar_event(update, context, event_data, source="photo")
     finally:
         # Удаляем временный файл
         try:
             os.unlink(tmp_path)
         except:
             pass
+
+
+def get_next_occurrence_of_weekday(start_date: datetime, target_weekday: str) -> datetime:
+    """
+    Находит следующее вхождение указанного дня недели, начиная с start_date.
+    
+    Args:
+        start_date: Дата начала поиска (datetime с timezone)
+        target_weekday: День недели на английском (Monday, Tuesday, etc.)
+    
+    Returns:
+        datetime следующего вхождения дня недели
+    """
+    weekday_map = {
+        "Monday": 0,
+        "Tuesday": 1,
+        "Wednesday": 2,
+        "Thursday": 3,
+        "Friday": 4,
+        "Saturday": 5,
+        "Sunday": 6
+    }
+    
+    target_weekday_num = weekday_map.get(target_weekday)
+    if target_weekday_num is None:
+        raise ValueError(f"Invalid weekday: {target_weekday}")
+    
+    current_weekday = start_date.weekday()
+    days_ahead = target_weekday_num - current_weekday
+    
+    # Если день недели уже прошел на этой неделе (но не сегодня), ищем на следующей неделе
+    # Если сегодня - используем сегодня
+    if days_ahead < 0:
+        days_ahead += 7
+    # Если days_ahead == 0, это сегодня - используем start_date как есть
+    
+    return start_date + timedelta(days=days_ahead)
+
+
+async def handle_schedule_import(update: Update, context: ContextTypes.DEFAULT_TYPE, schedule_data: Dict, source: str):
+    """
+    Обрабатывает импорт рекуррентного расписания.
+    
+    Args:
+        update: Telegram Update object
+        context: Context object
+        schedule_data: Данные расписания с ключом 'events'
+        source: Источник (text/photo)
+    """
+    chat_id = update.effective_chat.id
+    
+    if not schedule_data.get("is_recurring_schedule", False) or "events" not in schedule_data:
+        return
+    
+    events = schedule_data["events"]
+    if not events or len(events) == 0:
+        await update.message.reply_text(
+            "❌ No valid events found in the schedule.",
+            reply_markup=build_main_menu()
+        )
+        return
+    
+    # Сохраняем расписание в user_data
+    context.user_data['pending_schedule'] = events
+    context.user_data['state'] = 'WAITING_FOR_WEEKS'
+    
+    # Отправляем сообщение с вопросом о количестве недель
+    await update.message.reply_text(
+        f"👀 I see a weekly schedule with {len(events)} classes. For how many weeks should I add this to your calendar? (e.g., write '10' or '12'):"
+    )
+    
+    track_event(chat_id, "schedule_import_initiated", {"source": source, "events_count": len(events)})
+
+
+async def handle_weeks_response(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+    """
+    Обрабатывает ответ пользователя о количестве недель для расписания.
+    
+    Args:
+        update: Telegram Update object
+        context: Context object
+        text: Текст ответа пользователя
+    """
+    chat_id = update.effective_chat.id
+    
+    # Проверяем авторизацию Google Calendar
+    stored_tokens = get_google_tokens(chat_id)
+    if not stored_tokens:
+        await update.message.reply_text(
+            "❌ Please connect your Google Calendar first using /start",
+            reply_markup=build_main_menu()
+        )
+        context.user_data.pop('state', None)
+        context.user_data.pop('pending_schedule', None)
+        return
+    
+    credentials = get_credentials_from_stored(chat_id, stored_tokens)
+    if not credentials:
+        await update.message.reply_text(
+            "❌ Authorization error. Please reconnect your Google Calendar using /start",
+            reply_markup=build_main_menu()
+        )
+        context.user_data.pop('state', None)
+        context.user_data.pop('pending_schedule', None)
+        return
+    
+    # Парсим количество недель
+    try:
+        num_weeks = int(text.strip())
+        if num_weeks <= 0 or num_weeks > 52:
+            raise ValueError("Invalid number of weeks")
+    except (ValueError, TypeError):
+        await update.message.reply_text(
+            "❌ Please enter a valid number of weeks (1-52):"
+        )
+        return
+    
+    # Получаем сохраненное расписание
+    pending_schedule = context.user_data.get('pending_schedule')
+    if not pending_schedule:
+        await update.message.reply_text(
+            "❌ Schedule data not found. Please try importing the schedule again.",
+            reply_markup=build_main_menu()
+        )
+        context.user_data.pop('state', None)
+        context.user_data.pop('pending_schedule', None)
+        return
+    
+    # Получаем таймзону пользователя
+    user_timezone = get_user_timezone(chat_id) or DEFAULT_TZ
+    tz = pytz.timezone(user_timezone)
+    now_local = datetime.now(tz)
+    
+    # Начинаем с сегодняшнего дня
+    start_date = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    events_created = 0
+    
+    try:
+        # Цикл по неделям
+        for week in range(num_weeks):
+            # Для каждого события в расписании
+            for event in pending_schedule:
+                day_of_week = event.get("day_of_week")
+                start_time_str = event.get("start_time")
+                end_time_str = event.get("end_time")
+                summary = event.get("summary", "Event")
+                location = event.get("location", "")
+                
+                if not day_of_week or not start_time_str:
+                    continue
+                
+                # Вычисляем дату следующего вхождения дня недели
+                # Начинаем с today + (week * 7 дней)
+                week_start = start_date + timedelta(weeks=week)
+                event_date = get_next_occurrence_of_weekday(week_start, day_of_week)
+                
+                # Парсим время
+                try:
+                    start_parts = start_time_str.split(":")
+                    end_parts = end_time_str.split(":")
+                    if len(start_parts) != 2 or len(end_parts) != 2:
+                        continue
+                    
+                    start_hour = int(start_parts[0])
+                    start_minute = int(start_parts[1])
+                    end_hour = int(end_parts[0])
+                    end_minute = int(end_parts[1])
+                    
+                    # Валидация времени
+                    if not (0 <= start_hour <= 23 and 0 <= start_minute <= 59 and 
+                            0 <= end_hour <= 23 and 0 <= end_minute <= 59):
+                        continue
+                    
+                    # Создаем datetime для начала и конца события
+                    # Убеждаемся, что timezone сохраняется (replace сохраняет tzinfo)
+                    event_start = event_date.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
+                    event_end = event_date.replace(hour=end_hour, minute=end_minute, second=0, microsecond=0)
+                    
+                    # Если end_time меньше start_time, значит событие переходит на следующий день
+                    # Но только если разница разумная (например, 23:00 - 01:00, а не 10:00 - 09:00)
+                    if event_end <= event_start:
+                        # Проверяем, что это действительно переход через полночь (end_hour < start_hour)
+                        if end_hour < start_hour or (end_hour == start_hour and end_minute < start_minute):
+                            event_end = event_end + timedelta(days=1)
+                        else:
+                            # Если end_time просто меньше, но не переход через полночь, добавляем час
+                            event_end = event_start + timedelta(hours=1)
+                    
+                    # Конвертируем в UTC для API
+                    event_start_utc = event_start.astimezone(pytz.utc)
+                    event_end_utc = event_end.astimezone(pytz.utc)
+                    
+                    # Формируем данные события
+                    event_data = {
+                        "summary": summary,
+                        "start_time": event_start_utc.isoformat(),
+                        "end_time": event_end_utc.isoformat(),
+                        "description": "",
+                        "location": location
+                    }
+                    
+                    # Создаем событие в календаре (без проверки доступности)
+                    try:
+                        event_url = create_event(credentials, event_data)
+                        if event_url:
+                            events_created += 1
+                    except Exception as create_error:
+                        # Логируем ошибку, но продолжаем создавать остальные события
+                        print(f"[Bot] Ошибка при создании события '{summary}' из расписания: {create_error}")
+                        continue
+                    
+                except (ValueError, IndexError) as e:
+                    print(f"[Bot] Ошибка при парсинге события из расписания: {e}")
+                    continue
+        
+        # Отправляем подтверждение
+        await update.message.reply_text(
+            f"✅ Added schedule for {num_weeks} weeks! Created {events_created} event(s).",
+            reply_markup=build_main_menu()
+        )
+        
+        track_event(chat_id, "schedule_imported", {"weeks": num_weeks, "events_created": events_created})
+        
+    except Exception as e:
+        print(f"[Bot] Ошибка при импорте расписания: {e}")
+        await update.message.reply_text(
+            f"❌ An error occurred while importing the schedule: {str(e)[:100]}",
+            reply_markup=build_main_menu()
+        )
+        track_event(chat_id, "error", {"error_type": "schedule_import_failed", "error_message": str(e)[:100]})
+    finally:
+        # Очищаем состояние
+        context.user_data.pop('state', None)
+        context.user_data.pop('pending_schedule', None)
 
 
 async def process_task(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, source: str):
@@ -1039,6 +1435,11 @@ async def process_task(update: Update, context: ContextTypes.DEFAULT_TYPE, text:
             track_event(chat_id, "error", {"error_type": "ai_parse_failed"})
             return
 
+        # Проверяем, является ли это рекуррентным расписанием
+        if ai_parsed.get("is_recurring_schedule", False):
+            await handle_schedule_import(update, context, ai_parsed, source=source)
+            return
+        
         # Проверяем, является ли это задачей
         if not ai_parsed.get("is_task", True):
             await update.message.reply_text(
@@ -1171,14 +1572,6 @@ async def show_daily_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     button_text = f"{summary[:55]}{time_str}"
                 keyboard.append([InlineKeyboardButton(button_text, callback_data=f"done_{event_id}")])
         
-        # Добавляем кнопку обновления
-        if keyboard:
-            keyboard.append([InlineKeyboardButton("🔄 Refresh", callback_data="refresh_today")])
-        
-        # Если нет невыполненных задач, добавляем только кнопку обновления
-        if not keyboard and completed_events:
-            keyboard = [[InlineKeyboardButton("🔄 Refresh", callback_data="refresh_today")]]
-        
         # Всегда создаем клавиатуру, даже если пустая (чтобы избежать ошибки "Inline keyboard expected")
         reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else InlineKeyboardMarkup([])
         
@@ -1251,11 +1644,17 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     # НЕ вызываем query.answer() здесь для callback, которые сами вызывают его позже:
     # - "done_*" и "already_done_*" - вызывают query.answer() в конце обработки
     # - "refresh_today" - вызывает query.answer() после обновления списка
+    # - "reschedule_*" - вызывают query.answer() после обработки
+    # - "confirm_move_*" - вызывают query.answer() после обработки
+    # - "cancel_*" - вызывают query.answer() после обработки
     # - "reschedule_leftovers" - вызывает query.answer() после переноса задач
     # Вызываем только для других callback, которые не обрабатываются дальше
     if (not callback_data.startswith("done_") and 
         callback_data != "already_done_" and 
         callback_data != "refresh_today" and 
+        not callback_data.startswith("reschedule_") and
+        not callback_data.startswith("confirm_move_") and
+        not callback_data.startswith("cancel_") and
         callback_data != "reschedule_leftovers"):
         await query.answer("")  # Убираем дублирование текста кнопки для других callback
     
@@ -1345,14 +1744,6 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                     if len(button_text) > 60:
                         button_text = f"{summary[:55]}{time_str}"
                     keyboard.append([InlineKeyboardButton(button_text, callback_data=f"done_{event_id}")])
-            
-            # Добавляем кнопку обновления
-            if keyboard:
-                keyboard.append([InlineKeyboardButton("🔄 Refresh", callback_data="refresh_today")])
-            
-            # Если нет невыполненных задач, добавляем только кнопку обновления
-            if not keyboard and completed_events:
-                keyboard = [[InlineKeyboardButton("🔄 Refresh", callback_data="refresh_today")]]
             
             # Всегда создаем клавиатуру, даже если пустая (чтобы избежать ошибки "Inline keyboard expected")
             reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else InlineKeyboardMarkup([])
@@ -1454,14 +1845,6 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                                 button_text = f"{summary[:55]}{time_str}"
                             new_keyboard.append([InlineKeyboardButton(button_text, callback_data=f"done_{event_id_item}")])
                     
-                    # Добавляем кнопку обновления
-                    if new_keyboard:
-                        new_keyboard.append([InlineKeyboardButton("🔄 Refresh", callback_data="refresh_today")])
-                    
-                    # Если нет невыполненных задач, добавляем только кнопку обновления
-                    if not new_keyboard and completed_events:
-                        new_keyboard = [[InlineKeyboardButton("🔄 Refresh", callback_data="refresh_today")]]
-                    
                     # Всегда создаем клавиатуру, даже если пустая (чтобы избежать ошибки "Inline keyboard expected")
                     new_markup = InlineKeyboardMarkup(new_keyboard) if new_keyboard else InlineKeyboardMarkup([])
                     
@@ -1503,6 +1886,332 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             print(f"[Bot] Ошибка при отметке задачи как выполненной: {e}")
             await query.answer("❌ An error occurred. Please try again.", show_alert=True)
             track_event(chat_id, "error", {"error_type": "mark_task_done", "error_message": str(e)[:100]})
+    
+    # Обработка подтверждения переноса на предложенный слот (должен быть перед reschedule_manual_)
+    elif callback_data.startswith("confirm_move_"):
+        # Формат: confirm_move_{event_id}|{timestamp}
+        # Используем | как разделитель, так как event_id может содержать underscores
+        prefix = "confirm_move_"
+        if len(callback_data) > len(prefix):
+            remaining = callback_data[len(prefix):]
+            # Разделяем на event_id и timestamp по |
+            if "|" in remaining:
+                parts = remaining.split("|", 1)
+                if len(parts) == 2:
+                    event_id = parts[0]
+                    timestamp_str = parts[1]
+                else:
+                    event_id = None
+                    timestamp_str = None
+            else:
+                event_id = None
+                timestamp_str = None
+        else:
+            event_id = None
+            timestamp_str = None
+        
+        if event_id and timestamp_str:
+            try:
+                from datetime import timedelta
+                from googleapiclient.discovery import build
+                
+                # Восстанавливаем datetime из timestamp
+                try:
+                    timestamp_int = int(timestamp_str)
+                    suggested_time = datetime.fromtimestamp(timestamp_int, tz=pytz.utc)
+                except (ValueError, OSError) as e:
+                    print(f"[Bot] Invalid timestamp in confirm_move: {timestamp_str}, error: {e}")
+                    await query.answer("❌ Invalid timestamp. Please try rescheduling again.", show_alert=True)
+                    return
+                
+                user_timezone = get_user_timezone(chat_id) or DEFAULT_TZ
+                tz = pytz.timezone(user_timezone)
+                suggested_time = suggested_time.astimezone(tz)
+                
+                # Получаем событие для вычисления длительности
+                service = build('calendar', 'v3', credentials=credentials)
+                event = service.events().get(calendarId='primary', eventId=event_id).execute()
+                
+                # Вычисляем длительность
+                start_str = event['start'].get('dateTime', event['start'].get('date'))
+                end_str = event['end'].get('dateTime', event['end'].get('date'))
+                
+                if 'T' in start_str:
+                    orig_start_dt = datetime.fromisoformat(start_str.replace('Z', '+00:00'))
+                    if orig_start_dt.tzinfo is None:
+                        orig_start_dt = pytz.utc.localize(orig_start_dt)
+                    orig_end_dt = datetime.fromisoformat(end_str.replace('Z', '+00:00'))
+                    if orig_end_dt.tzinfo is None:
+                        orig_end_dt = pytz.utc.localize(orig_end_dt)
+                    duration = orig_end_dt - orig_start_dt
+                else:
+                    duration = timedelta(hours=1)
+                
+                new_end_dt = suggested_time + duration
+                
+                # Переносим событие
+                new_start_utc = suggested_time.astimezone(pytz.utc)
+                new_end_utc = new_end_dt.astimezone(pytz.utc)
+                
+                success = reschedule_event(credentials, event_id, new_start_utc, new_end_utc)
+                
+                if success:
+                    # Обновляем сообщение: удаляем кнопки для этой задачи
+                    inline_keyboard = query.message.reply_markup.inline_keyboard if query.message.reply_markup else []
+                    new_keyboard = []
+                    task_summary = event.get('summary', 'Task')
+                    
+                    for row in inline_keyboard:
+                        new_row = []
+                        for button in row:
+                            if (button.callback_data == callback_data or 
+                                button.callback_data == f"done_{event_id}" or 
+                                button.callback_data == f"reschedule_{event_id}" or
+                                button.callback_data == f"reschedule_manual_{event_id}" or
+                                (button.callback_data.startswith(f"confirm_move_{event_id}|") or 
+                                 button.callback_data.startswith(f"confirm_move_{event_id}_"))):
+                                # Пропускаем кнопки для этой задачи
+                                continue
+                            else:
+                                new_row.append(button)
+                        if new_row:
+                            new_keyboard.append(new_row)
+                    
+                    # Обновляем текст сообщения
+                    message_text = query.message.text or ""
+                    time_str = suggested_time.strftime('%H:%M')
+                    message_text += f"\n\n✅ Moved to tomorrow at {time_str}"
+                    
+                    new_markup = InlineKeyboardMarkup(new_keyboard) if new_keyboard else None
+                    await query.edit_message_text(
+                        message_text,
+                        reply_markup=new_markup
+                    )
+                    await query.answer("✅ Task moved!")
+                    track_event(chat_id, "task_rescheduled_smart", {"event_id": event_id})
+                else:
+                    await query.answer("❌ Failed to reschedule. Please try again.", show_alert=True)
+                    
+            except Exception as e:
+                print(f"[Bot] Ошибка при подтверждении переноса задачи: {e}")
+                await query.answer("❌ An error occurred. Please try again.", show_alert=True)
+                track_event(chat_id, "error", {"error_type": "confirm_reschedule", "error_message": str(e)[:100]})
+        else:
+            await query.answer("❌ Invalid confirmation data.", show_alert=True)
+    
+    # Обработка ручного ввода времени для переноса (должен быть перед общим reschedule_)
+    elif callback_data.startswith("reschedule_manual_"):
+        event_id = callback_data[18:]  # Убираем префикс "reschedule_manual_"
+        
+        # Сохраняем event_id в user_data для обработки текстового ввода
+        context.user_data['rescheduling_event_id'] = event_id
+        context.user_data['waiting_for'] = 'reschedule_time'
+        
+        await query.answer("")
+        await query.edit_message_text(
+            "Please enter the time in HH:MM format (e.g., 14:00):"
+        )
+    
+    # Обработка переноса задачи (reschedule)
+    elif callback_data.startswith("reschedule_"):
+        event_id = callback_data[11:]  # Убираем префикс "reschedule_"
+        
+        try:
+            from datetime import timedelta
+            from googleapiclient.discovery import build
+            
+            user_timezone = get_user_timezone(chat_id) or DEFAULT_TZ
+            tz = pytz.timezone(user_timezone)
+            now_local = datetime.now(tz)
+            
+            # Получаем событие
+            service = build('calendar', 'v3', credentials=credentials)
+            event = service.events().get(calendarId='primary', eventId=event_id).execute()
+            
+            # Получаем текущее время начала
+            start_str = event['start'].get('dateTime', event['start'].get('date'))
+            is_all_day = 'T' not in start_str
+            
+            if is_all_day:
+                # Для all-day событий используем 09:00 завтра
+                tomorrow = now_local + timedelta(days=1)
+                start_dt = tomorrow.replace(hour=9, minute=0, second=0, microsecond=0)
+                start_dt = tz.localize(start_dt) if start_dt.tzinfo is None else start_dt
+            else:
+                # Парсим текущее время
+                start_dt = datetime.fromisoformat(start_str.replace('Z', '+00:00'))
+                if start_dt.tzinfo is None:
+                    start_dt = pytz.utc.localize(start_dt)
+                start_dt = start_dt.astimezone(tz)
+                
+                # Переносим на завтра (те же часы и минуты)
+                tomorrow = now_local + timedelta(days=1)
+                new_start_dt = tomorrow.replace(hour=start_dt.hour, minute=start_dt.minute, second=0, microsecond=0)
+                new_start_dt = tz.localize(new_start_dt) if new_start_dt.tzinfo is None else new_start_dt
+                start_dt = new_start_dt
+            
+            # Вычисляем длительность
+            end_str = event['end'].get('dateTime', event['end'].get('date'))
+            if 'T' in end_str:
+                # Для timed событий вычисляем длительность из оригинального времени
+                orig_start_dt = datetime.fromisoformat(start_str.replace('Z', '+00:00'))
+                if orig_start_dt.tzinfo is None:
+                    orig_start_dt = pytz.utc.localize(orig_start_dt)
+                orig_start_dt = orig_start_dt.astimezone(tz)
+                
+                orig_end_dt = datetime.fromisoformat(end_str.replace('Z', '+00:00'))
+                if orig_end_dt.tzinfo is None:
+                    orig_end_dt = pytz.utc.localize(orig_end_dt)
+                orig_end_dt = orig_end_dt.astimezone(tz)
+                
+                duration = orig_end_dt - orig_start_dt
+            else:
+                duration = timedelta(hours=1)  # По умолчанию 1 час для all-day событий
+            
+            new_end_dt = start_dt + duration
+            
+            # Вычисляем длительность в минутах для find_next_free_slot
+            duration_minutes = int(duration.total_seconds() / 60)
+            
+            # Проверяем доступность целевого слота
+            is_available = check_slot_availability(credentials, start_dt, new_end_dt)
+            
+            if is_available:
+                # Сценарий A: Слот свободен - переносим событие немедленно
+                new_start_utc = start_dt.astimezone(pytz.utc)
+                new_end_utc = new_end_dt.astimezone(pytz.utc)
+                
+                success = reschedule_event(credentials, event_id, new_start_utc, new_end_utc)
+                
+                if success:
+                    # Обновляем сообщение: удаляем кнопки для этой задачи и добавляем текст
+                    inline_keyboard = query.message.reply_markup.inline_keyboard if query.message.reply_markup else []
+                    new_keyboard = []
+                    task_summary = event.get('summary', 'Task')
+                    
+                    for row in inline_keyboard:
+                        new_row = []
+                        for button in row:
+                            if (button.callback_data == callback_data or 
+                                button.callback_data == f"done_{event_id}" or
+                                button.callback_data == f"reschedule_manual_{event_id}" or
+                                (button.callback_data.startswith(f"confirm_move_{event_id}|") or 
+                                 button.callback_data.startswith(f"confirm_move_{event_id}_"))):
+                                # Пропускаем кнопки для этой задачи
+                                continue
+                            else:
+                                new_row.append(button)
+                        if new_row:
+                            new_keyboard.append(new_row)
+                    
+                    # Обновляем текст сообщения
+                    message_text = query.message.text or ""
+                    time_str = start_dt.strftime('%H:%M')
+                    message_text += f"\n\n✅ Moved to tomorrow at {time_str}"
+                    
+                    new_markup = InlineKeyboardMarkup(new_keyboard) if new_keyboard else None
+                    await query.edit_message_text(
+                        message_text,
+                        reply_markup=new_markup
+                    )
+                    await query.answer("✅ Task moved to tomorrow!")
+                    track_event(chat_id, "task_rescheduled", {"event_id": event_id})
+                else:
+                    await query.answer("❌ Failed to reschedule. Please try again.", show_alert=True)
+            else:
+                # Сценарий B: Слот занят - ищем следующий свободный слот
+                task_summary = event.get('summary', 'Task')
+                original_time_str = start_dt.strftime('%H:%M')
+                
+                # Ищем следующий свободный слот
+                next_free_slot = find_next_free_slot(credentials, start_dt, duration_minutes)
+                
+                if next_free_slot:
+                    # Найден свободный слот - предлагаем его
+                    new_time_str = next_free_slot.strftime('%H:%M')
+                    # Сохраняем timestamp для подтверждения
+                    timestamp_str = str(int(next_free_slot.timestamp()))
+                    # Используем | как разделитель, так как event_id может содержать underscores
+                    callback_data_confirm = f"confirm_move_{event_id}|{timestamp_str}"
+                    
+                    keyboard = [
+                        [InlineKeyboardButton(f"✅ Yes, move to {new_time_str}", callback_data=callback_data_confirm)],
+                        [InlineKeyboardButton("✏️ No, enter manually", callback_data=f"reschedule_manual_{event_id}")],
+                        [InlineKeyboardButton("❌ Cancel task", callback_data=f"cancel_{event_id}")]
+                    ]
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    
+                    await query.edit_message_text(
+                        f"⚠️ Slot at {original_time_str} tomorrow is busy. But I found a free slot at **{new_time_str}**. Move there?",
+                        reply_markup=reply_markup,
+                        parse_mode='Markdown'
+                    )
+                    await query.answer("")
+                else:
+                    # Слот не найден - просим выбрать время вручную
+                    keyboard = [
+                        [InlineKeyboardButton("✏️ Enter Manually", callback_data=f"reschedule_manual_{event_id}")],
+                        [InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{event_id}")]
+                    ]
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    
+                    await query.edit_message_text(
+                        "Tomorrow looks fully booked. Please choose a time.",
+                        reply_markup=reply_markup
+                    )
+                    await query.answer("")
+                
+        except Exception as e:
+            print(f"[Bot] Ошибка при переносе задачи: {e}")
+            await query.answer("❌ An error occurred. Please try again.", show_alert=True)
+            track_event(chat_id, "error", {"error_type": "reschedule_task", "error_message": str(e)[:100]})
+    
+    # Обработка отмены задачи
+    elif callback_data.startswith("cancel_"):
+        event_id = callback_data[7:]  # Убираем префикс "cancel_"
+        
+        try:
+            success = cancel_event(credentials, event_id)
+            
+            if success:
+                # Обновляем сообщение: удаляем кнопки для этой задачи
+                inline_keyboard = query.message.reply_markup.inline_keyboard if query.message.reply_markup else []
+                new_keyboard = []
+                
+                for row in inline_keyboard:
+                        new_row = []
+                        for button in row:
+                            if (button.callback_data == callback_data or 
+                                button.callback_data == f"done_{event_id}" or 
+                                button.callback_data == f"reschedule_{event_id}" or
+                                button.callback_data == f"reschedule_manual_{event_id}" or
+                                (button.callback_data.startswith(f"confirm_move_{event_id}|") or 
+                                 button.callback_data.startswith(f"confirm_move_{event_id}_"))):
+                                # Пропускаем кнопки для этой задачи
+                                continue
+                            else:
+                                new_row.append(button)
+                        if new_row:
+                            new_keyboard.append(new_row)
+                
+                # Обновляем текст сообщения
+                message_text = query.message.text or ""
+                message_text += "\n\n❌ Task cancelled."
+                
+                new_markup = InlineKeyboardMarkup(new_keyboard) if new_keyboard else None
+                await query.edit_message_text(
+                    message_text,
+                    reply_markup=new_markup
+                )
+                await query.answer("✅ Task cancelled!")
+                track_event(chat_id, "task_cancelled", {"event_id": event_id})
+            else:
+                await query.answer("❌ Failed to cancel task. Please try again.", show_alert=True)
+                
+        except Exception as e:
+            print(f"[Bot] Ошибка при отмене задачи: {e}")
+            await query.answer("❌ An error occurred. Please try again.", show_alert=True)
+            track_event(chat_id, "error", {"error_type": "cancel_task", "error_message": str(e)[:100]})
     
     # Обработка переноса остатка задач на завтра
     elif callback_data == "reschedule_leftovers":
@@ -1633,8 +2342,10 @@ async def create_calendar_event(update: Update, context: ContextTypes.DEFAULT_TY
         auth_url = get_authorization_url(chat_id, redirect_uri)
         print(f"[Bot] Отправляем ссылку на авторизацию Google Calendar для chat_id={chat_id}")
         await update.message.reply_text(
-            f"🔗 Please connect your Google Calendar first:\n{auth_url}",
-            reply_markup=build_main_menu()
+            f"🔗 Please connect your Google Calendar first:\n\n"
+            f'<a href="{auth_url}">🔗 Connect Google Calendar</a>',
+            reply_markup=build_main_menu(),
+            parse_mode='HTML'
         )
         return
     
@@ -1670,10 +2381,7 @@ async def create_calendar_event(update: Update, context: ContextTypes.DEFAULT_TY
         start_local = start_dt.replace(tzinfo=pytz.utc).astimezone(pytz.timezone(tz))
         
         await update.message.reply_text(
-            f"✅ Event added to calendar!\n\n"
-            f"📅 {event_data.get('summary', 'Task')}\n"
-            f"🕐 {start_local.strftime('%m/%d %H:%M')}\n\n"
-            f"🔗 {event_url}",
+            f"✅ Event added: {event_data.get('summary', 'Task')} at {start_local.strftime('%H:%M')}",
             reply_markup=build_main_menu()
         )
     else:

@@ -309,6 +309,184 @@ def mark_event_done(credentials: Credentials, event_id: str, event_title: str) -
         return False
 
 
+def check_slot_availability(credentials: Credentials, start_dt: datetime, end_dt: datetime) -> bool:
+    """
+    Проверяет, свободен ли временной слот в календаре.
+    Alias для check_availability для обратной совместимости.
+    
+    Args:
+        credentials: Объект Credentials для доступа к API
+        start_dt: Время начала (datetime с timezone)
+        end_dt: Время окончания (datetime с timezone)
+    
+    Returns:
+        True если слот свободен, False если занят
+    """
+    return check_availability(credentials, start_dt, end_dt)
+
+
+def check_availability(credentials: Credentials, start_dt: datetime, end_dt: datetime) -> bool:
+    """
+    Проверяет, свободен ли временной слот в календаре.
+    
+    Args:
+        credentials: Объект Credentials для доступа к API
+        start_dt: Время начала (datetime с timezone)
+        end_dt: Время окончания (datetime с timezone)
+    
+    Returns:
+        True если слот свободен, False если занят
+    """
+    try:
+        service = build('calendar', 'v3', credentials=credentials)
+        
+        # Конвертируем в UTC для API
+        start_utc = start_dt.astimezone(pytz.utc).isoformat()
+        end_utc = end_dt.astimezone(pytz.utc).isoformat()
+        
+        # Проверяем свободные слоты
+        freebusy_result = service.freebusy().query(
+            body={
+                "timeMin": start_utc,
+                "timeMax": end_utc,
+                "items": [{"id": "primary"}]
+            }
+        ).execute()
+        
+        # Проверяем, есть ли конфликты
+        calendars = freebusy_result.get('calendars', {})
+        primary_calendar = calendars.get('primary', {})
+        busy_slots = primary_calendar.get('busy', [])
+        
+        # Если есть занятые слоты, проверяем пересечение
+        if busy_slots:
+            for busy_slot in busy_slots:
+                busy_start = datetime.fromisoformat(busy_slot['start'].replace('Z', '+00:00'))
+                busy_end = datetime.fromisoformat(busy_slot['end'].replace('Z', '+00:00'))
+                
+                # Проверяем пересечение
+                if start_dt < busy_end and end_dt > busy_start:
+                    return False  # Слот занят
+        
+        return True  # Слот свободен
+        
+    except HttpError as e:
+        print(f"[Calendar Service] Ошибка HTTP при проверке доступности: {e}")
+        return False  # В случае ошибки считаем, что слот занят
+    except Exception as e:
+        print(f"[Calendar Service] Ошибка при проверке доступности: {e}")
+        return False  # В случае ошибки считаем, что слот занят
+
+
+def find_next_free_slot(credentials: Credentials, start_dt: datetime, duration_minutes: int = 30) -> Optional[datetime]:
+    """
+    Находит следующий свободный слот, начиная с указанного времени.
+    Проверяет доступность в 30-минутных интервалах в течение следующих 12 часов.
+    
+    Args:
+        credentials: Объект Credentials для доступа к API
+        start_dt: Время начала поиска (datetime с timezone)
+        duration_minutes: Длительность слота в минутах (по умолчанию 30)
+    
+    Returns:
+        Первый найденный свободный datetime или None, если ничего не найдено
+    """
+    try:
+        from datetime import timedelta
+        
+        # Вычисляем время окончания поиска (12 часов от start_dt)
+        end_search_dt = start_dt + timedelta(hours=12)
+        
+        # Конвертируем в UTC для API
+        start_utc = start_dt.astimezone(pytz.utc).isoformat()
+        end_utc = end_search_dt.astimezone(pytz.utc).isoformat()
+        
+        # Получаем информацию о занятости на весь период поиска
+        service = build('calendar', 'v3', credentials=credentials)
+        freebusy_result = service.freebusy().query(
+            body={
+                "timeMin": start_utc,
+                "timeMax": end_utc,
+                "items": [{"id": "primary"}]
+            }
+        ).execute()
+        
+        # Получаем список занятых слотов
+        calendars = freebusy_result.get('calendars', {})
+        primary_calendar = calendars.get('primary', {})
+        busy_slots = primary_calendar.get('busy', [])
+        
+        # Конвертируем занятые слоты в datetime объекты
+        busy_periods = []
+        for busy_slot in busy_slots:
+            busy_start = datetime.fromisoformat(busy_slot['start'].replace('Z', '+00:00'))
+            busy_end = datetime.fromisoformat(busy_slot['end'].replace('Z', '+00:00'))
+            # Конвертируем в timezone start_dt
+            if busy_start.tzinfo is None:
+                busy_start = pytz.utc.localize(busy_start)
+            if busy_end.tzinfo is None:
+                busy_end = pytz.utc.localize(busy_end)
+            busy_start = busy_start.astimezone(start_dt.tzinfo)
+            busy_end = busy_end.astimezone(start_dt.tzinfo)
+            busy_periods.append((busy_start, busy_end))
+        
+        # Сортируем занятые периоды по времени начала
+        busy_periods.sort(key=lambda x: x[0])
+        
+        # Проверяем слоты с шагом 30 минут
+        current_check = start_dt
+        # Округляем до ближайшего 30-минутного интервала
+        if current_check.minute < 30:
+            current_check = current_check.replace(minute=0, second=0, microsecond=0)
+        else:
+            current_check = current_check.replace(minute=30, second=0, microsecond=0)
+        
+        duration = timedelta(minutes=duration_minutes)
+        
+        while current_check < end_search_dt:
+            slot_end = current_check + duration
+            
+            # Проверяем, не пересекается ли этот слот с занятыми периодами
+            is_free = True
+            conflict_end = None
+            
+            for busy_start, busy_end in busy_periods:
+                # Если слот пересекается с занятым периодом
+                if current_check < busy_end and slot_end > busy_start:
+                    is_free = False
+                    # Запоминаем конец конфликтующего периода (берем самый поздний)
+                    if conflict_end is None or busy_end > conflict_end:
+                        conflict_end = busy_end
+            
+            if is_free:
+                return current_check
+            
+            # Перемещаемся к концу конфликтующего периода или следующему 30-минутному интервалу
+            if conflict_end and conflict_end > current_check:
+                current_check = conflict_end
+                # Округляем до следующего 30-минутного интервала
+                if current_check.minute < 30:
+                    current_check = current_check.replace(minute=30, second=0, microsecond=0)
+                else:
+                    current_check = (current_check + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+            else:
+                # Переходим к следующему 30-минутному интервалу
+                if current_check.minute < 30:
+                    current_check = current_check.replace(minute=30, second=0, microsecond=0)
+                else:
+                    current_check = (current_check + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+        
+        # Ничего не найдено
+        return None
+        
+    except HttpError as e:
+        print(f"[Calendar Service] Ошибка HTTP при поиске свободного слота: {e}")
+        return None
+    except Exception as e:
+        print(f"[Calendar Service] Ошибка при поиске свободного слота: {e}")
+        return None
+
+
 def reschedule_event(credentials: Credentials, event_id: str, new_start_time: datetime, new_end_time: datetime) -> bool:
     """
     Переносит событие на новое время.
@@ -352,5 +530,50 @@ def reschedule_event(credentials: Credentials, event_id: str, new_start_time: da
         return False
     except Exception as e:
         print(f"[Calendar Service] Ошибка при переносе события: {e}")
+        return False
+
+
+def cancel_event(credentials: Credentials, event_id: str) -> bool:
+    """
+    Отменяет событие, добавляя префикс "❌ " к заголовку.
+    
+    Args:
+        credentials: Объект Credentials для доступа к API
+        event_id: ID события в Google Calendar
+    
+    Returns:
+        True если успешно, False в случае ошибки
+    """
+    try:
+        service = build('calendar', 'v3', credentials=credentials)
+        
+        # Получаем текущее событие
+        event = service.events().get(calendarId='primary', eventId=event_id).execute()
+        
+        # Получаем текущий summary
+        current_summary = event.get('summary', 'Task')
+        
+        # Проверяем, не отменено ли уже событие
+        if current_summary.startswith('❌ '):
+            return True  # Уже отменено
+        
+        # Добавляем префикс "❌ "
+        new_summary = f"❌ {current_summary}"
+        
+        # Обновляем событие
+        event['summary'] = new_summary
+        updated_event = service.events().update(
+            calendarId='primary',
+            eventId=event_id,
+            body=event
+        ).execute()
+        
+        return True
+        
+    except HttpError as e:
+        print(f"[Calendar Service] Ошибка HTTP при отмене события: {e}")
+        return False
+    except Exception as e:
+        print(f"[Calendar Service] Ошибка при отмене события: {e}")
         return False
 
