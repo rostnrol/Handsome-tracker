@@ -57,6 +57,7 @@ except Exception:
 
 DB_PATH = os.getenv("DB_PATH", "tasks.db")
 DEFAULT_TZ = os.getenv("DEFAULT_TZ", "UTC")
+MAX_VOICE_DURATION_SECONDS = 20  # Максимальная длительность голосовых сообщений в секундах
 
 TF = None  # lazy TimezoneFinder singleton
 
@@ -1090,6 +1091,16 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(
             "Please complete the setup first by sending /start"
         )
+        return
+
+    # Проверяем длительность голосового сообщения
+    voice_duration = update.message.voice.duration
+    if voice_duration is not None and voice_duration > MAX_VOICE_DURATION_SECONDS:
+        await update.message.reply_text(
+            "⚠️ Voice message too long! Please keep it under 20 seconds to save time.",
+            reply_markup=build_main_menu()
+        )
+        track_event(chat_id, "error", {"error_type": "voice_too_long", "duration": voice_duration})
         return
 
     # Трекинг события
@@ -2179,20 +2190,20 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 new_keyboard = []
                 
                 for row in inline_keyboard:
-                        new_row = []
-                        for button in row:
-                            if (button.callback_data == callback_data or 
-                                button.callback_data == f"done_{event_id}" or 
-                                button.callback_data == f"reschedule_{event_id}" or
-                                button.callback_data == f"reschedule_manual_{event_id}" or
-                                (button.callback_data.startswith(f"confirm_move_{event_id}|") or 
-                                 button.callback_data.startswith(f"confirm_move_{event_id}_"))):
-                                # Пропускаем кнопки для этой задачи
-                                continue
-                            else:
-                                new_row.append(button)
-                        if new_row:
-                            new_keyboard.append(new_row)
+                    new_row = []
+                    for button in row:
+                        if (button.callback_data == callback_data or 
+                            button.callback_data == f"done_{event_id}" or 
+                            button.callback_data == f"reschedule_{event_id}" or
+                            button.callback_data == f"reschedule_manual_{event_id}" or
+                            (button.callback_data.startswith(f"confirm_move_{event_id}|") or 
+                             button.callback_data.startswith(f"confirm_move_{event_id}_"))):
+                            # Пропускаем кнопки для этой задачи
+                            continue
+                        else:
+                            new_row.append(button)
+                    if new_row:
+                        new_keyboard.append(new_row)
                 
                 # Обновляем текст сообщения
                 message_text = query.message.text or ""
@@ -2277,8 +2288,9 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                         # Для all-day событий start_dt уже установлен на завтра, не добавляем день
                         new_start = start_dt
                     else:
-                        # Для timed событий добавляем один день
-                        new_start = start_dt + timedelta(days=1)
+                        # Для timed событий конвертируем в локальный timezone и добавляем один день
+                        start_dt_local = start_dt.astimezone(tz)
+                        new_start = start_dt_local + timedelta(days=1)
                         if new_start < now_local:
                             # Если время уже прошло, ставим на утро завтра
                             new_start = tomorrow.replace(hour=9, minute=0, second=0, microsecond=0)
@@ -2378,7 +2390,10 @@ async def create_calendar_event(update: Update, context: ContextTypes.DEFAULT_TY
         
         tz = get_user_timezone(chat_id) or DEFAULT_TZ
         start_dt = datetime.fromisoformat(event_data["start_time"].replace("Z", "+00:00"))
-        start_local = start_dt.replace(tzinfo=pytz.utc).astimezone(pytz.timezone(tz))
+        # Убеждаемся, что timezone установлен правильно
+        if start_dt.tzinfo is None:
+            start_dt = pytz.utc.localize(start_dt)
+        start_local = start_dt.astimezone(pytz.timezone(tz))
         
         await update.message.reply_text(
             f"✅ Event added: {event_data.get('summary', 'Task')} at {start_local.strftime('%H:%M')}",
@@ -2470,7 +2485,13 @@ def main():
                     status=400
                 )
             
-            chat_id = int(state)
+            try:
+                chat_id = int(state)
+            except (ValueError, TypeError):
+                return web.Response(
+                    text="Error: Invalid state parameter",
+                    status=400
+                )
             redirect_uri = f"{base_url}/google/callback"
             
             # Обмениваем код на токены
