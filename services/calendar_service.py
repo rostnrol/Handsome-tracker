@@ -13,7 +13,7 @@ from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from services.db_service import save_google_tokens
+from services.db_service import save_google_tokens, delete_google_tokens
 
 
 # Конфигурация OAuth2
@@ -192,10 +192,20 @@ def get_credentials_from_stored(user_id: int, stored_tokens: Dict) -> Optional[C
                 save_google_tokens(user_id, updated_tokens)
                 print(f"[Calendar Service] Токены обновлены и сохранены для user_id={user_id}")
             except Exception as refresh_error:
+                error_str = str(refresh_error)
                 print(f"[Calendar Service] Ошибка при обновлении токена для user_id={user_id}: {refresh_error}")
-                # Если не удалось обновить, все равно возвращаем credentials (может быть еще валидным)
+                if "invalid_grant" in error_str or "Token has been expired or revoked" in error_str:
+                    print(f"[Calendar Service] invalid_grant для user_id={user_id} — удаляем токены из БД")
+                    delete_google_tokens(user_id)
+                    # Re-raise as a specific sentinel so callers can notify the user.
+                    # We raise here OUTSIDE the inner try/except so the outer handler won't swallow it.
+                    raise ValueError(f"invalid_grant:{user_id}") from refresh_error
+                # Any other refresh error — keep going; the token might still be usable.
         
         return creds
+    except ValueError:
+        # Let ValueError (e.g. invalid_grant sentinel) propagate to the caller unchanged.
+        raise
     except Exception as e:
         print(f"[Calendar Service] Ошибка при создании credentials для user_id={user_id}: {e}")
         import traceback
@@ -328,96 +338,51 @@ def check_slot_availability(credentials: Credentials, start_dt: datetime, end_dt
 
 def check_availability(credentials: Credentials, start_dt: datetime, end_dt: datetime, exclude_event_id: Optional[str] = None) -> bool:
     """
-    Проверяет, свободен ли временной слот в календаре.
-    Проверяет ТОЛЬКО пересечение с существующими событиями в указанном интервале.
+    Checks whether a time slot is free in Google Calendar.
+    Uses events().list to find events that overlap with [start_dt, end_dt].
     
-    Args:
-        credentials: Объект Credentials для доступа к API
-        start_dt: Время начала (datetime с timezone)
-        end_dt: Время окончания (datetime с timezone)
-        exclude_event_id: ID события, которое нужно исключить из проверки (например, при переносе)
-    
-    Returns:
-        True если слот свободен, False если занят
+    Returns True if the slot is free, False if busy.
     """
     try:
         service = build('calendar', 'v3', credentials=credentials)
-        
-        # Конвертируем в UTC для API
-        start_utc = start_dt.astimezone(pytz.utc).isoformat()
-        end_utc = end_dt.astimezone(pytz.utc).isoformat()
-        
-        # Если нужно исключить событие, получаем его данные для фильтрации
-        exclude_event_times = None
-        if exclude_event_id:
-            try:
-                exclude_event = service.events().get(calendarId='primary', eventId=exclude_event_id).execute()
-                exclude_start_str = exclude_event['start'].get('dateTime', exclude_event['start'].get('date'))
-                exclude_end_str = exclude_event['end'].get('dateTime', exclude_event['end'].get('date'))
-                
-                if 'T' in exclude_start_str:
-                    exclude_start = datetime.fromisoformat(exclude_start_str.replace('Z', '+00:00'))
-                    exclude_end = datetime.fromisoformat(exclude_end_str.replace('Z', '+00:00'))
-                    if exclude_start.tzinfo is None:
-                        exclude_start = pytz.utc.localize(exclude_start)
-                    if exclude_end.tzinfo is None:
-                        exclude_end = pytz.utc.localize(exclude_end)
-                    exclude_event_times = (exclude_start.astimezone(start_dt.tzinfo), exclude_end.astimezone(start_dt.tzinfo))
-            except Exception as e:
-                print(f"[Calendar Service] Не удалось получить событие для исключения {exclude_event_id}: {e}")
-        
-        # Проверяем свободные слоты ТОЛЬКО для указанного интервала
-        freebusy_result = service.freebusy().query(
-            body={
-                "timeMin": start_utc,
-                "timeMax": end_utc,
-                "items": [{"id": "primary"}]
-            }
+
+        # Ensure both datetimes are timezone-aware
+        if start_dt.tzinfo is None:
+            start_dt = pytz.utc.localize(start_dt)
+        if end_dt.tzinfo is None:
+            end_dt = pytz.utc.localize(end_dt)
+
+        # RFC3339 strings in UTC
+        time_min = start_dt.astimezone(pytz.utc).isoformat()
+        time_max = end_dt.astimezone(pytz.utc).isoformat()
+
+        events_result = service.events().list(
+            calendarId='primary',
+            timeMin=time_min,
+            timeMax=time_max,
+            singleEvents=True,
+            orderBy='startTime'
         ).execute()
-        
-        # Проверяем, есть ли конфликты
-        calendars = freebusy_result.get('calendars', {})
-        primary_calendar = calendars.get('primary', {})
-        busy_slots = primary_calendar.get('busy', [])
-        
-        # Если есть занятые слоты, проверяем пересечение
-        # Слот занят ТОЛЬКО если существует событие, которое ПЕРЕСЕКАЕТСЯ с нашим интервалом
-        if busy_slots:
-            for busy_slot in busy_slots:
-                busy_start = datetime.fromisoformat(busy_slot['start'].replace('Z', '+00:00'))
-                busy_end = datetime.fromisoformat(busy_slot['end'].replace('Z', '+00:00'))
-                
-                # Конвертируем в timezone start_dt для корректного сравнения
-                if busy_start.tzinfo is None:
-                    busy_start = pytz.utc.localize(busy_start)
-                if busy_end.tzinfo is None:
-                    busy_end = pytz.utc.localize(busy_end)
-                busy_start = busy_start.astimezone(start_dt.tzinfo)
-                busy_end = busy_end.astimezone(start_dt.tzinfo)
-                
-                # Пропускаем исключенное событие (если оно совпадает по времени)
-                if exclude_event_times:
-                    exclude_start, exclude_end = exclude_event_times
-                    # Если busy слот точно совпадает с исключенным событием, пропускаем его
-                    if (abs((busy_start - exclude_start).total_seconds()) < 1 and 
-                        abs((busy_end - exclude_end).total_seconds()) < 1):
-                        continue
-                
-                # Проверяем пересечение: слот занят если busy период перекрывает наш интервал
-                # Формула пересечения: max(start1, start2) < min(end1, end2)
-                overlap_start = max(busy_start, start_dt)
-                overlap_end = min(busy_end, end_dt)
-                if overlap_start < overlap_end:
-                    return False  # Слот занят (есть пересечение)
-        
-        return True  # Слот свободен
-        
+
+        events = events_result.get('items', [])
+        print(f"[Calendar Service] check_availability {time_min} → {time_max}: found {len(events)} event(s)")
+
+        if not events:
+            return True  # Slot is free
+
+        # Filter out the event being rescheduled
+        if exclude_event_id:
+            events = [e for e in events if e.get('id') != exclude_event_id]
+            print(f"[Calendar Service] After excluding {exclude_event_id}: {len(events)} event(s) remain")
+
+        return len(events) == 0  # True = free
+
     except HttpError as e:
-        print(f"[Calendar Service] Ошибка HTTP при проверке доступности: {e}")
-        return False  # В случае ошибки считаем, что слот занят
+        print(f"[Calendar Service] HTTP error in check_availability: {e}")
+        return False
     except Exception as e:
-        print(f"[Calendar Service] Ошибка при проверке доступности: {e}")
-        return False  # В случае ошибки считаем, что слот занят
+        print(f"[Calendar Service] Error in check_availability: {e}")
+        return False
 
 
 def find_next_free_slot(credentials: Credentials, start_dt: datetime, duration_minutes: int = 30, exclude_event_id: Optional[str] = None) -> Optional[datetime]:
@@ -436,116 +401,99 @@ def find_next_free_slot(credentials: Credentials, start_dt: datetime, duration_m
     """
     try:
         from datetime import timedelta
-        
-        # Вычисляем время окончания поиска (12 часов от start_dt)
+
+        if start_dt.tzinfo is None:
+            start_dt = pytz.utc.localize(start_dt)
+
         end_search_dt = start_dt + timedelta(hours=12)
-        
-        # Конвертируем в UTC для API
-        start_utc = start_dt.astimezone(pytz.utc).isoformat()
-        end_utc = end_search_dt.astimezone(pytz.utc).isoformat()
-        
-        # Получаем информацию о занятости на весь период поиска
+
+        time_min = start_dt.astimezone(pytz.utc).isoformat()
+        time_max = end_search_dt.astimezone(pytz.utc).isoformat()
+
         service = build('calendar', 'v3', credentials=credentials)
-        freebusy_result = service.freebusy().query(
-            body={
-                "timeMin": start_utc,
-                "timeMax": end_utc,
-                "items": [{"id": "primary"}]
-            }
+
+        # Fetch all events in the search window
+        events_result = service.events().list(
+            calendarId='primary',
+            timeMin=time_min,
+            timeMax=time_max,
+            singleEvents=True,
+            orderBy='startTime'
         ).execute()
-        
-        # Получаем список занятых слотов
-        calendars = freebusy_result.get('calendars', {})
-        primary_calendar = calendars.get('primary', {})
-        busy_slots = primary_calendar.get('busy', [])
-        
-        # Если нужно исключить событие, получаем его данные для фильтрации
-        exclude_event_times = None
+
+        raw_events = events_result.get('items', [])
+        print(f"[Calendar Service] find_next_free_slot {time_min} → {time_max}: {len(raw_events)} event(s)")
+
+        # Exclude the event being rescheduled
         if exclude_event_id:
-            try:
-                exclude_event = service.events().get(calendarId='primary', eventId=exclude_event_id).execute()
-                exclude_start_str = exclude_event['start'].get('dateTime', exclude_event['start'].get('date'))
-                exclude_end_str = exclude_event['end'].get('dateTime', exclude_event['end'].get('date'))
-                
-                if 'T' in exclude_start_str:
-                    exclude_start = datetime.fromisoformat(exclude_start_str.replace('Z', '+00:00'))
-                    exclude_end = datetime.fromisoformat(exclude_end_str.replace('Z', '+00:00'))
-                    if exclude_start.tzinfo is None:
-                        exclude_start = pytz.utc.localize(exclude_start)
-                    if exclude_end.tzinfo is None:
-                        exclude_end = pytz.utc.localize(exclude_end)
-                    exclude_event_times = (exclude_start.astimezone(start_dt.tzinfo), exclude_end.astimezone(start_dt.tzinfo))
-            except Exception as e:
-                print(f"[Calendar Service] Не удалось получить событие для исключения {exclude_event_id}: {e}")
-        
-        # Конвертируем занятые слоты в datetime объекты
+            raw_events = [e for e in raw_events if e.get('id') != exclude_event_id]
+            print(f"[Calendar Service] After excluding {exclude_event_id}: {len(raw_events)} event(s)")
+
+        # Build busy_periods list
+        # All-day events (date-only) block the entire day and are treated as busy.
         busy_periods = []
-        for busy_slot in busy_slots:
-            busy_start = datetime.fromisoformat(busy_slot['start'].replace('Z', '+00:00'))
-            busy_end = datetime.fromisoformat(busy_slot['end'].replace('Z', '+00:00'))
-            # Конвертируем в timezone start_dt
-            if busy_start.tzinfo is None:
-                busy_start = pytz.utc.localize(busy_start)
-            if busy_end.tzinfo is None:
-                busy_end = pytz.utc.localize(busy_end)
-            busy_start = busy_start.astimezone(start_dt.tzinfo)
-            busy_end = busy_end.astimezone(start_dt.tzinfo)
-            
-            # Пропускаем исключенное событие (если оно совпадает по времени)
-            if exclude_event_times:
-                exclude_start, exclude_end = exclude_event_times
-                # Если busy слот точно совпадает с исключенным событием, пропускаем его
-                if (abs((busy_start - exclude_start).total_seconds()) < 1 and 
-                    abs((busy_end - exclude_end).total_seconds()) < 1):
+        tz = start_dt.tzinfo or pytz.utc
+        for ev in raw_events:
+            ev_start_str = ev['start'].get('dateTime')
+            ev_end_str = ev['end'].get('dateTime')
+            if not ev_start_str or not ev_end_str:
+                # All-day event: 'date' field only (format YYYY-MM-DD).
+                # Treat the whole day as busy by converting to midnight–midnight in user tz.
+                date_str = ev['start'].get('date')
+                date_end_str = ev['end'].get('date')
+                if not date_str:
                     continue
-            
-            busy_periods.append((busy_start, busy_end))
+                # Use localize() for pytz timezones to avoid broken UTC-offset datetimes.
+                tz_for_localize = tz if hasattr(tz, 'localize') else pytz.utc
+                day_start_naive = datetime.strptime(date_str, '%Y-%m-%d')
+                day_start = tz_for_localize.localize(day_start_naive)
+                if date_end_str:
+                    day_end_naive = datetime.strptime(date_end_str, '%Y-%m-%d')
+                    day_end = tz_for_localize.localize(day_end_naive)
+                else:
+                    day_end = day_start + timedelta(days=1)
+                busy_periods.append((day_start, day_end))
+                continue
+            ev_start = datetime.fromisoformat(ev_start_str.replace('Z', '+00:00'))
+            ev_end = datetime.fromisoformat(ev_end_str.replace('Z', '+00:00'))
+            if ev_start.tzinfo is None:
+                ev_start = pytz.utc.localize(ev_start)
+            if ev_end.tzinfo is None:
+                ev_end = pytz.utc.localize(ev_end)
+            ev_start = ev_start.astimezone(tz)
+            ev_end = ev_end.astimezone(tz)
+            busy_periods.append((ev_start, ev_end))
         
         # Сортируем занятые периоды по времени начала
         busy_periods.sort(key=lambda x: x[0])
         
-        # Проверяем слоты с шагом 30 минут
-        current_check = start_dt
-        # Округляем до ближайшего 30-минутного интервала
-        if current_check.minute < 30:
-            current_check = current_check.replace(minute=0, second=0, microsecond=0)
-        else:
-            current_check = current_check.replace(minute=30, second=0, microsecond=0)
-        
         duration = timedelta(minutes=duration_minutes)
-        
+
+        # Start from start_dt exactly (truncate seconds for cleanliness).
+        current_check = start_dt.replace(second=0, microsecond=0)
+
         while current_check < end_search_dt:
             slot_end = current_check + duration
-            
-            # Проверяем, не пересекается ли этот слот с занятыми периодами
+
+            # Check overlap with every busy period.
             is_free = True
             conflict_end = None
-            
+
             for busy_start, busy_end in busy_periods:
-                # Если слот пересекается с занятым периодом
                 if current_check < busy_end and slot_end > busy_start:
                     is_free = False
-                    # Запоминаем конец конфликтующего периода (берем самый поздний)
                     if conflict_end is None or busy_end > conflict_end:
                         conflict_end = busy_end
-            
+
             if is_free:
                 return current_check
-            
-            # Перемещаемся к концу конфликтующего периода или следующему 30-минутному интервалу
+
+            # Jump to the end of the latest conflicting period and try again.
             if conflict_end and conflict_end > current_check:
-                current_check = conflict_end
-                # Округляем до следующего 30-минутного интервала
-                if current_check.minute < 30:
-                    current_check = current_check.replace(minute=30, second=0, microsecond=0)
-                else:
-                    current_check = (current_check + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+                current_check = conflict_end.replace(second=0, microsecond=0)
             else:
-                # Переходим к следующему 30-минутному интервалу
-                if current_check.minute < 30:
-                    current_check = current_check.replace(minute=30, second=0, microsecond=0)
-                else:
-                    current_check = (current_check + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+                # Guard against infinite loop (shouldn't normally happen).
+                current_check += timedelta(minutes=1)
         
         # Ничего не найдено
         return None

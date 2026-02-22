@@ -39,6 +39,16 @@ def get_google_tokens(user_id: int) -> Optional[Dict]:
     return None
 
 
+def delete_google_tokens(user_id: int) -> None:
+    """Удаляет Google OAuth токены пользователя из БД (например, при invalid_grant)"""
+    con = get_con()
+    cur = con.cursor()
+    cur.execute("DELETE FROM google_oauth_tokens WHERE user_id=?", (user_id,))
+    con.commit()
+    con.close()
+    print(f"[DB Service] Токены удалены для user_id={user_id}")
+
+
 def save_google_tokens(user_id: int, tokens: Dict) -> None:
     """Сохраняет Google OAuth токены для пользователя"""
     con = get_con()

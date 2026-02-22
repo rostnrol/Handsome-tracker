@@ -95,7 +95,18 @@ async def send_morning_briefing(bot, chat_id: int, user_timezone: str):
             )
             return
         
-        credentials = get_credentials_from_stored(chat_id, stored_tokens)
+        try:
+            credentials = get_credentials_from_stored(chat_id, stored_tokens)
+        except ValueError as ve:
+            if str(ve).startswith("invalid_grant:"):
+                print(f"[Scheduler Service] invalid_grant для chat_id={chat_id} — токены удалены, уведомляем пользователя")
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="Good morning! 🌅\n\n⚠️ Your Google Calendar connection has expired. Please reconnect by typing /start."
+                )
+                return
+            raise
+
         if not credentials:
             await bot.send_message(
                 chat_id=chat_id,
@@ -122,7 +133,8 @@ async def send_morning_briefing(bot, chat_id: int, user_timezone: str):
         tasks_list = []
         for event in events:
             summary = event.get('summary', 'Task')
-            # Убираем "✅ " если есть (для отображения)
+            if summary.startswith('❌ '):
+                continue  # skip cancelled tasks
             if summary.startswith('✅ '):
                 summary = summary[2:]
             
@@ -143,10 +155,17 @@ async def send_morning_briefing(bot, chat_id: int, user_timezone: str):
             else:
                 tasks_list.append(summary)
         
+        # If all events were cancelled/hidden, treat as no tasks
+        if not tasks_list:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="No tasks for today yet. Enjoy your freedom!"
+            )
+            return
+
         # Объединяем вступление и список задач
         briefing = f"{intro}\n\n" + "\n".join(tasks_list)
         
-        # Отправляем брифинг
         await bot.send_message(
             chat_id=chat_id,
             text=briefing
@@ -181,7 +200,18 @@ async def send_evening_recap(bot, chat_id: int, user_timezone: str):
             )
             return
         
-        credentials = get_credentials_from_stored(chat_id, stored_tokens)
+        try:
+            credentials = get_credentials_from_stored(chat_id, stored_tokens)
+        except ValueError as ve:
+            if str(ve).startswith("invalid_grant:"):
+                print(f"[Scheduler Service] invalid_grant для chat_id={chat_id} — токены удалены, уведомляем пользователя")
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="Good evening! 🌙\n\n⚠️ Your Google Calendar connection has expired. Please reconnect by typing /start."
+                )
+                return
+            raise
+
         if not credentials:
             await bot.send_message(
                 chat_id=chat_id,
@@ -192,9 +222,13 @@ async def send_evening_recap(bot, chat_id: int, user_timezone: str):
         # Получаем события на сегодня
         events = get_today_events(credentials, user_timezone)
         
-        # Разделяем выполненные и невыполненные задачи
+        # Разделяем выполненные и невыполненные задачи; скрываем отменённые (❌)
         completed_events = [e for e in events if e.get('summary', '').startswith('✅ ')]
-        incomplete_events = [e for e in events if not e.get('summary', '').startswith('✅ ')]
+        incomplete_events = [
+            e for e in events
+            if not e.get('summary', '').startswith('✅ ')
+            and not e.get('summary', '').startswith('❌ ')
+        ]
         
         # Формируем сообщение - только интро
         message_text = "Hey, hope it was a productive day!\n\n"
@@ -233,8 +267,7 @@ async def send_evening_recap(bot, chat_id: int, user_timezone: str):
         else:
             message_text += "🎉 No uncompleted tasks! Great job!"
         
-        # Создаем inline-клавиатуру для невыполненных задач
-        # Каждая задача представлена 2 строками: метка + 3 кнопки действий
+        # Создаем inline-клавиатуру для невыполненных задач (одна строка на задачу)
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
         
         keyboard = []
@@ -255,25 +288,13 @@ async def send_evening_recap(bot, chat_id: int, user_timezone: str):
                     except:
                         pass
                 
-                # Row 1: Метка с названием задачи (без эмодзи, чистый текст)
-                # Формат: "HH:MM Task Name" или "Task Name" если нет времени
-                if time_str:
-                    label_text = f"{time_str} {summary}"
-                else:
-                    label_text = summary
-                
-                # Ограничиваем длину до 64 символов (Telegram лимит)
-                if len(label_text) > 64:
-                    label_text = f"{time_str} {summary[:50]}" if time_str else summary[:64]
-                
-                # Row 1: Label button (callback_data='ignore' - неактивная кнопка)
-                keyboard.append([InlineKeyboardButton(label_text, callback_data='ignore')])
-                
-                # Row 2: Три кнопки действий
+                label_text = f"{time_str} {summary}" if time_str else summary
+                label_text = label_text[:40]
                 keyboard.append([
-                    InlineKeyboardButton("✅ Done", callback_data=f"done_{event_id}"),
-                    InlineKeyboardButton("➡️ Reschedule", callback_data=f"reschedule_{event_id}"),
-                    InlineKeyboardButton("❌ Delete", callback_data=f"delete_{event_id}")
+                    InlineKeyboardButton(label_text, callback_data='ignore'),
+                    InlineKeyboardButton("✅", callback_data=f"done_{event_id}"),
+                    InlineKeyboardButton("➡️", callback_data=f"resch_{event_id}"),
+                    InlineKeyboardButton("❌", callback_data=f"del_{event_id}"),
                 ])
         
         reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
