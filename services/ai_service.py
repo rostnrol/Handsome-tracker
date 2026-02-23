@@ -282,8 +282,15 @@ async def parse_with_ai(text: str, user_timezone: str = "UTC", source_language: 
     # Определяем текущее время в часовом поясе пользователя
     tz = pytz.timezone(user_timezone)
     now_local = datetime.now(tz)
+    now_utc = datetime.now(pytz.utc)
     current_date = now_local.strftime('%Y-%m-%d')
     current_time = now_local.strftime('%H:%M:%S')
+    utc_offset = now_local.strftime('%z')  # e.g. +0300
+    # Format as +03:00
+    if len(utc_offset) == 5:
+        utc_offset_fmt = utc_offset[:3] + ':' + utc_offset[3:]
+    else:
+        utc_offset_fmt = utc_offset
     
     system_prompt = """You are an assistant for parsing tasks and events from text.
 Your task is to extract information about the task and return STRICTLY valid JSON without additional characters.
@@ -337,9 +344,14 @@ CRITICAL RULES:
 
 IMPORTANT: Return ONLY valid JSON, no markdown formatting, no backticks, no additional text."""
 
-    user_prompt = f"""Current date: {current_date}
-Current time: {current_time}
+    user_prompt = f"""Current date (local): {current_date}
+Current time (local): {current_time}
+UTC offset: {utc_offset_fmt}
 User timezone: {user_timezone}
+Current UTC time: {now_utc.strftime('%Y-%m-%dT%H:%M:%SZ')}
+
+IMPORTANT: When the user says a time (e.g. "14:00"), treat it as LOCAL time in the user's timezone (UTC offset {utc_offset_fmt}). Convert it to UTC for the output.
+Example: if UTC offset is +03:00 and user says "14:00", the UTC time is 11:00 (14:00 - 3h = 11:00 UTC).
 
 Task: {text}
 

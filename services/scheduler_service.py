@@ -75,6 +75,65 @@ def get_today_events(credentials, user_timezone: str) -> List[Dict]:
         return []
 
 
+def get_events_for_date(credentials, user_timezone: str, target_date) -> List[Dict]:
+    """
+    Получает события на указанную дату из Google Calendar.
+
+    Args:
+        credentials: Google OAuth credentials
+        user_timezone: Часовой пояс пользователя
+        target_date: объект date или datetime для нужного дня (local timezone)
+
+    Returns:
+        Список событий
+    """
+    try:
+        service = build('calendar', 'v3', credentials=credentials)
+        tz = pytz.timezone(user_timezone)
+
+        from datetime import date as date_type
+        if hasattr(target_date, 'date'):
+            local_date = target_date.date()
+        else:
+            local_date = target_date
+
+        from datetime import datetime as dt_type
+        start_of_day = tz.localize(dt_type(local_date.year, local_date.month, local_date.day, 0, 0, 0))
+        end_of_day = tz.localize(dt_type(local_date.year, local_date.month, local_date.day, 23, 59, 59))
+
+        start_utc = start_of_day.astimezone(pytz.utc).isoformat()
+        end_utc = end_of_day.astimezone(pytz.utc).isoformat()
+
+        events_result = service.events().list(
+            calendarId='primary',
+            timeMin=start_utc,
+            timeMax=end_utc,
+            maxResults=50,
+            singleEvents=True,
+            orderBy='startTime'
+        ).execute()
+
+        events = events_result.get('items', [])
+
+        formatted_events = []
+        for event in events:
+            start = event['start'].get('dateTime', event['start'].get('date'))
+            summary = event.get('summary', 'No title')
+            description = event.get('description', '')
+            event_id = event.get('id', '')
+            formatted_events.append({
+                'id': event_id,
+                'summary': summary,
+                'start_time': start,
+                'description': description
+            })
+
+        return formatted_events
+    except Exception as e:
+        print(f"[Scheduler Service] Ошибка при получении событий на дату: {e}")
+        return []
+
+
 async def send_morning_briefing(bot, chat_id: int, user_timezone: str):
     """
     Отправляет утренний брифинг пользователю.
@@ -289,9 +348,9 @@ async def send_evening_recap(bot, chat_id: int, user_timezone: str):
                         pass
                 
                 label_text = f"{time_str} {summary}" if time_str else summary
-                label_text = label_text[:40]
+                label_text = label_text[:55]
+                keyboard.append([InlineKeyboardButton(label_text, callback_data=f'label_{event_id}')])
                 keyboard.append([
-                    InlineKeyboardButton(label_text, callback_data='ignore'),
                     InlineKeyboardButton("✅", callback_data=f"done_{event_id}"),
                     InlineKeyboardButton("➡️", callback_data=f"resch_{event_id}"),
                     InlineKeyboardButton("❌", callback_data=f"del_{event_id}"),

@@ -554,7 +554,7 @@ def reschedule_event(credentials: Credentials, event_id: str, new_start_time: da
 
 def cancel_event(credentials: Credentials, event_id: str) -> bool:
     """
-    Отменяет событие, добавляя префикс "❌ " к заголовку.
+    Удаляет событие из Google Calendar.
     
     Args:
         credentials: Объект Credentials для доступа к API
@@ -565,32 +565,11 @@ def cancel_event(credentials: Credentials, event_id: str) -> bool:
     """
     try:
         service = build('calendar', 'v3', credentials=credentials)
-        
-        # Получаем текущее событие
-        event = service.events().get(calendarId='primary', eventId=event_id).execute()
-        
-        # Получаем текущий summary
-        current_summary = event.get('summary', 'Task')
-        
-        # Проверяем, не отменено ли уже событие
-        if current_summary.startswith('❌ '):
-            return True  # Уже отменено
-        
-        # Добавляем префикс "❌ "
-        new_summary = f"❌ {current_summary}"
-        
-        # Обновляем событие
-        event['summary'] = new_summary
-        updated_event = service.events().update(
-            calendarId='primary',
-            eventId=event_id,
-            body=event
-        ).execute()
-        
+        service.events().delete(calendarId='primary', eventId=event_id).execute()
         return True
         
     except HttpError as e:
-        print(f"[Calendar Service] Ошибка HTTP при отмене события: {e}")
+        print(f"[Calendar Service] Ошибка HTTP при удалении события: {e}")
         return False
     except Exception as e:
         print(f"[Calendar Service] Ошибка при отмене события: {e}")
