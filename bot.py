@@ -493,6 +493,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.chat_data['onboard_stage'] = 'ask_name'
 
 
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /help"""
+    await update.message.reply_text(
+        "ℹ️ <b>How to use this bot:</b>\n\n"
+        "• Send any text, voice message, or photo to create a task\n"
+        "• <b>📋 Tasks for Today</b> — view and manage today's tasks\n"
+        "• <b>📆 Tasks for a Date</b> — view tasks for any date\n"
+        "• <b>📅 Open Google Calendar</b> — open your calendar\n"
+        "• <b>⚙️ Settings</b> — change name, timezone, briefing times\n\n"
+        "Task buttons:\n"
+        "✅ — mark as done\n"
+        "➡️ — reschedule to a new time\n"
+        "❌ — delete the task\n\n"
+        "Type /start to reset or reconnect Google Calendar.",
+        parse_mode='HTML',
+        reply_markup=build_main_menu()
+    )
+
+
 async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик геолокации"""
     if not update.message or not update.message.location:
@@ -885,12 +904,6 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             user_timezone = get_user_timezone(chat_id) or DEFAULT_TZ
             ai_parsed = await parse_with_ai(text, user_timezone)
 
-            # #region agent log
-            import json as _json, time as _time
-            with open('debug-bf4c4c.log', 'a') as _f:
-                _f.write(_json.dumps({"sessionId":"bf4c4c","runId":"run1","hypothesisId":"A","location":"bot.py:reschedule_time","message":"ai_parsed result","data":{"text":text,"ai_parsed":ai_parsed,"is_task":ai_parsed.get("is_task") if ai_parsed else None,"start_time":ai_parsed.get("start_time") if ai_parsed else None},"timestamp":int(_time.time()*1000)}) + '\n')
-            # #endregion
-            
             if not ai_parsed or not ai_parsed.get("is_task", True):
                 # Если AI не смог распарсить, пробуем простой формат HH:MM
                 if ':' in text.strip():
@@ -910,10 +923,6 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                                 new_start_dt = candidate
                             else:
                                 new_start_dt = candidate + timedelta(days=1)
-                            # #region agent log
-                            with open('debug-bf4c4c.log', 'a') as _f:
-                                _f.write(_json.dumps({"sessionId":"bf4c4c","runId":"run1","hypothesisId":"B","location":"bot.py:hhmm_fallback","message":"HH:MM fallback parsed","data":{"hour":hour,"minute":minute,"candidate_str":str(candidate),"new_start_dt_str":str(new_start_dt),"candidate_tzinfo":str(candidate.tzinfo)},"timestamp":int(_time.time()*1000)}) + '\n')
-                            # #endregion
                         else:
                             raise ValueError("Invalid time range")
                     else:
@@ -933,10 +942,6 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 # Конвертируем в локальный timezone
                 tz = pytz.timezone(user_timezone)
                 new_start_dt = start_dt.astimezone(tz)
-                # #region agent log
-                with open('debug-bf4c4c.log', 'a') as _f:
-                    _f.write(_json.dumps({"sessionId":"bf4c4c","runId":"run1","hypothesisId":"C","location":"bot.py:ai_path","message":"AI path used","data":{"start_dt_str":start_dt_str,"new_start_dt_str":str(new_start_dt),"tz":user_timezone},"timestamp":int(_time.time()*1000)}) + '\n')
-                # #endregion
             
             # Получаем событие для вычисления длительности
             from googleapiclient.discovery import build
@@ -959,11 +964,6 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 duration = timedelta(hours=1)
             
             new_end_dt = new_start_dt + duration
-
-            # #region agent log
-            with open('debug-bf4c4c.log', 'a') as _f:
-                _f.write(_json.dumps({"sessionId":"bf4c4c","runId":"run1","hypothesisId":"E","location":"bot.py:before_check","message":"before check_availability","data":{"new_start_dt":str(new_start_dt),"new_end_dt":str(new_end_dt),"new_start_utc":str(new_start_dt.astimezone(pytz.utc)),"tzinfo":str(new_start_dt.tzinfo)},"timestamp":int(_time.time()*1000)}) + '\n')
-            # #endregion
             
             # Проверяем доступность (исключаем само событие из проверки)
             is_available = check_availability(credentials, new_start_dt, new_end_dt, exclude_event_id=event_id)
@@ -1652,7 +1652,7 @@ async def show_daily_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if not events:
             await update.message.reply_text(
-                "📅 **Mark what you've already done:**\n\n"
+                "📅 **Here are your tasks for today:**\n\n"
                 "No tasks scheduled for today! 🎉",
                 reply_markup=build_main_menu(),
                 parse_mode='Markdown'
@@ -1721,8 +1721,7 @@ async def show_daily_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 label_text = f"{time_str} {summary}" if time_str else summary
                 keyboard.extend(_build_task_row(event_id, label_text))
         
-        # Всегда создаем клавиатуру, даже если пустая
-        reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else InlineKeyboardMarkup([])
+        reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
         
         await update.message.reply_text(
             message_text,
@@ -1787,12 +1786,6 @@ async def show_tasks_for_date(update: Update, context: ContextTypes.DEFAULT_TYPE
                     target_date = dt.astimezone(tz).date()
                 except Exception:
                     pass
-
-    # #region agent log
-    import json as _json, time as _time
-    with open('debug-bf4c4c.log', 'a') as _f:
-        _f.write(_json.dumps({"sessionId":"bf4c4c","runId":"run1","hypothesisId":"D","location":"bot.py:show_tasks_for_date","message":"date parse result","data":{"date_text":date_text,"target_date":str(target_date)},"timestamp":int(_time.time()*1000)}) + '\n')
-    # #endregion
 
     if target_date is None:
         await update.message.reply_text(
@@ -1869,7 +1862,7 @@ async def show_tasks_for_date(update: Update, context: ContextTypes.DEFAULT_TYPE
             message_text += "\n"
 
         if incomplete_events:
-            message_text += "📌 Tasks to complete:\n"
+            message_text += "📋 Tasks to complete:\n"
         else:
             message_text += "🎉 All tasks completed!"
 
@@ -1892,7 +1885,7 @@ async def show_tasks_for_date(update: Update, context: ContextTypes.DEFAULT_TYPE
             label_text = f"{time_str} {summary}" if time_str else summary
             keyboard.extend(_build_task_row(event_id, label_text))
 
-        reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+        reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else build_main_menu()
         await update.message.reply_text(
             message_text,
             reply_markup=reply_markup,
@@ -1986,6 +1979,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     
     stored_tokens = get_google_tokens(chat_id)
     if not stored_tokens:
+        await query.answer("")
         await query.edit_message_text(
             "❌ Please connect your Google Calendar first using /start"
         )
@@ -1996,6 +1990,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         lambda t: query.edit_message_text(t)
     )
     if not credentials:
+        await query.answer("")
         return
 
     # Обработка обновления списка задач
@@ -2010,9 +2005,9 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             
             if not events:
                 await query.edit_message_text(
-                    "📅 **Mark what you've already done:**\n\n"
+                    "📅 **Here are your tasks for today:**\n\n"
                     "No tasks scheduled for today! 🎉",
-                    reply_markup=None,  # Явно очищаем клавиатуру
+                    reply_markup=None,
                     parse_mode='Markdown'
                 )
                 await query.answer("✅ List updated!")
@@ -2027,10 +2022,11 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             ]
             
             # Формируем текст сообщения
-            message_text = "📅 **Mark what you've already done:**\n\n"
+            message_text = "📅 **Here are your tasks for today:**\n\n"
             
             # Добавляем выполненные задачи
             if completed_events:
+                message_text += "✅ Completed:\n"
                 for event in completed_events:
                     summary = event.get('summary', 'Task')
                     if summary.startswith('✅ '):
@@ -2048,9 +2044,15 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                                     time_str = dt.strftime('%H:%M')
                         except:
                             pass
-                    message_text += f"✅ {time_str} {summary}\n" if time_str else f"✅ {summary}\n"
+                    message_text += f"  • {time_str} {summary}\n" if time_str else f"  • {summary}\n"
                 message_text += "\n"
             
+            # Добавляем секцию невыполненных задач
+            if incomplete_events:
+                message_text += "📋 Tasks to complete:\n"
+            else:
+                message_text += "🎉 All tasks completed! Great job!"
+
             # Создаем клавиатуру для невыполненных задач (одна строка на задачу)
             keyboard = []
             tz_obj = pytz.timezone(user_timezone)
@@ -2072,7 +2074,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                     label_text = f"{time_str} {summary}" if time_str else summary
                     keyboard.extend(_build_task_row(event_id, label_text))
             
-            reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else InlineKeyboardMarkup([])
+            reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
             
             await query.edit_message_text(
                 message_text,
@@ -2185,7 +2187,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                             label_text = f"{time_str} {evt_summary}" if time_str else evt_summary
                             new_keyboard.extend(_build_task_row(event_id_item, label_text))
                     
-                    new_markup = InlineKeyboardMarkup(new_keyboard) if new_keyboard else InlineKeyboardMarkup([])
+                    new_markup = InlineKeyboardMarkup(new_keyboard) if new_keyboard else None
                     await query.edit_message_text(
                         new_message_text,
                         reply_markup=new_markup,
@@ -2279,8 +2281,18 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                     inline_keyboard = query.message.reply_markup.inline_keyboard if query.message.reply_markup else []
                     new_keyboard = _remove_task_row(inline_keyboard, event_id)
                     message_text = query.message.text or ""
+                    user_timezone = get_user_timezone(chat_id) or DEFAULT_TZ
+                    tz_local = pytz.timezone(user_timezone)
+                    now_local = datetime.now(tz_local)
                     time_str = suggested_time.strftime('%H:%M')
-                    message_text += f"\n\n✅ Moved to tomorrow at {time_str}"
+                    date_str = suggested_time.strftime('%Y-%m-%d')
+                    if date_str == now_local.strftime('%Y-%m-%d'):
+                        time_display = f"today at {time_str}"
+                    elif date_str == (now_local + timedelta(days=1)).strftime('%Y-%m-%d'):
+                        time_display = f"tomorrow at {time_str}"
+                    else:
+                        time_display = f"{suggested_time.strftime('%B %d')} at {time_str}"
+                    message_text += f"\n\n✅ Moved to {time_display}"
                     new_markup = InlineKeyboardMarkup(new_keyboard) if new_keyboard else None
                     await query.edit_message_text(message_text, reply_markup=new_markup)
                     await query.answer("✅ Task moved!")
@@ -2390,7 +2402,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         try:
             from datetime import timedelta
             
-            user_timezone = get_user_timezone(chat_id) or "UTC"
+            user_timezone = get_user_timezone(chat_id) or DEFAULT_TZ
             tz = pytz.timezone(user_timezone)
             now_local = datetime.now(tz)
             
@@ -2478,7 +2490,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             
             if rescheduled_count > 0:
                 await query.edit_message_text(
-                    f"Rescheduled {rescheduled_count} task(s) to tomorrow."
+                    f"✅ Rescheduled {rescheduled_count} task(s) to tomorrow."
                 )
                 await query.answer("✅ Done!")
                 track_event(chat_id, "tasks_rescheduled", {"count": rescheduled_count})
@@ -2604,7 +2616,7 @@ def main():
     con = get_con()
     try:
         cur = con.cursor()
-        cur.execute("INSERT OR IGNORE INTO app_lock (id, holder, acquired_utc) VALUES (1, ?, ?)", (holder, datetime.utcnow().isoformat()))
+        cur.execute("INSERT OR IGNORE INTO app_lock (id, holder, acquired_utc) VALUES (1, ?, ?)", (holder, datetime.now(pytz.utc).isoformat()))
         con.commit()
         cur.execute("SELECT holder FROM app_lock WHERE id=1")
         row = cur.fetchone()
@@ -2772,6 +2784,7 @@ def main():
 
     # Регистрируем хендлеры
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(MessageHandler(filters.LOCATION, location_handler))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))

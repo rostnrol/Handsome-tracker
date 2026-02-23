@@ -5,7 +5,7 @@ import os
 import sqlite3
 import json
 from typing import Optional, Dict
-from datetime import datetime
+from datetime import datetime, timezone
 
 DB_PATH = os.getenv("DB_PATH", "tasks.db")
 
@@ -75,7 +75,7 @@ def save_google_tokens(user_id: int, tokens: Dict) -> None:
             tokens.get("client_id"),
             tokens.get("client_secret"),
             json.dumps(tokens.get("scopes", [])),
-            datetime.utcnow().isoformat()
+            datetime.now(timezone.utc).isoformat()
         ),
     )
     con.commit()

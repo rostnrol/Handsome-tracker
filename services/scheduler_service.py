@@ -210,7 +210,7 @@ async def send_morning_briefing(bot, chat_id: int, user_timezone: str):
                     pass
             
             if time_str:
-                tasks_list.append(f"{time_str} - {summary}")
+                tasks_list.append(f"{time_str} {summary}")
             else:
                 tasks_list.append(summary)
         
@@ -315,7 +315,7 @@ async def send_evening_recap(bot, chat_id: int, user_timezone: str):
                         pass
                 
                 if time_str:
-                    message_text += f"  • {time_str} - {summary}\n"
+                    message_text += f"  • {time_str} {summary}\n"
                 else:
                     message_text += f"  • {summary}\n"
             message_text += "\n"
