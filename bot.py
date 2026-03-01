@@ -10,8 +10,9 @@ import json
 import tempfile
 import time as time_module
 from datetime import datetime, timedelta
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 import asyncio
+import re
 from aiohttp import web
 
 import pytz
@@ -45,7 +46,7 @@ from services.calendar_service import (
 from services.scheduler_service import get_today_events, get_events_for_date
 from services.analytics_service import track_event
 from services.scheduler_service import start_scheduler
-from services.db_service import get_google_tokens, save_google_tokens
+from services.db_service import get_google_tokens, save_google_tokens, delete_google_tokens
 
 # ---- timezonefinder (pure Python) ----
 try:
@@ -99,6 +100,59 @@ def _build_task_row(event_id: str, label_text: str) -> list:
             InlineKeyboardButton("❌", callback_data=f"del_{event_id}"),
         ],
     ]
+
+
+def _parse_duration_to_minutes(text: str) -> int:
+    """
+    Парсит длительность задачи из текста и возвращает количество минут.
+    Поддерживаемые форматы:
+    - "30" (минуты)
+    - "30m", "30 min", "30 minutes"
+    - "1h", "1 h", "1 hour", "2.5h"
+    - "1:30" (часы:минуты)
+    - Русские варианты: "30 мин", "1 час", "1.5 часа" и т.п.
+    """
+    s = text.strip().lower()
+    if not s:
+        raise ValueError("Empty duration")
+
+    s = s.replace(",", ".")
+
+    # Формат H:MM (например, 1:30)
+    if ":" in s:
+        parts = s.split(":")
+        if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+            try:
+                hours = float(parts[0].strip())
+                minutes = float(parts[1].strip())
+                total = int(hours * 60 + minutes)
+                if total > 0:
+                    return total
+            except ValueError:
+                pass
+
+    # Форматы с часами, например "1.5h", "2 часа"
+    hour_match = re.search(r"(\d+(\.\d+)?)\s*(h|hr|hour|hours|ч|час|часа|часов)\b", s)
+    if hour_match:
+        hours = float(hour_match.group(1))
+        total = int(hours * 60)
+        if total > 0:
+            return total
+
+    # Форматы с минутами, например "30m", "45 мин"
+    minute_match = re.search(r"(\d+)\s*(m|min|mins|minute|minutes|мин|минут|минуты)\b", s)
+    if minute_match:
+        minutes = int(minute_match.group(1))
+        if minutes > 0:
+            return minutes
+
+    # Чистое число — интерпретируем как минуты
+    if s.isdigit():
+        minutes = int(s)
+        if minutes > 0:
+            return minutes
+
+    raise ValueError(f"Cannot parse duration from '{text}'")
 
 
 async def _get_credentials_or_notify(chat_id: int, stored_tokens: dict, reply_fn) -> Optional[object]:
@@ -498,10 +552,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "ℹ️ <b>How to use this bot:</b>\n\n"
         "• Send any text, voice message, or photo to create a task\n"
+        "• When describing a task, specify both <b>start time</b> and (optionally) <b>duration</b> (e.g., <i>\"gym from 16:00 to 17:30\"</i>). If you don't specify duration, I'll ask how long the task takes.\n"
         "• <b>📋 Tasks for Today</b> — view and manage today's tasks\n"
         "• <b>📆 Tasks for a Date</b> — view tasks for any date\n"
         "• <b>📅 Open Google Calendar</b> — open your calendar\n"
-        "• <b>⚙️ Settings</b> — change name, timezone, briefing times\n\n"
+        "• <b>⚙️ Settings</b> — change name, timezone, briefing times, and Google Calendar connection\n\n"
         "Task buttons:\n"
         "✅ — mark as done\n"
         "➡️ — reschedule to a new time\n"
@@ -647,6 +702,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         morning_time = get_morning_time(chat_id)
         evening_time = get_evening_time(chat_id)
         user_name = get_user_name(chat_id)
+        has_calendar = has_google_auth(chat_id)
         
         settings_text = f"⚙️ Settings\n\n"
         if user_name:
@@ -654,14 +710,22 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         settings_text += f"Timezone: {tz}\n"
         settings_text += f"Morning briefing: {morning_time}\n"
         settings_text += f"Evening recap: {evening_time}\n\n"
+        settings_text += "Google Calendar: "
+        settings_text += "connected\n\n" if has_calendar else "not connected\n\n"
         settings_text += "Select what you want to change:"
         
-        keyboard = [
+        keyboard_rows = [
             [InlineKeyboardButton("✏️ Change Name", callback_data="set_name")],
             [InlineKeyboardButton("🌍 Change Timezone", callback_data="set_tz")],
             [InlineKeyboardButton("🌅 Morning Time", callback_data="set_morning")],
-            [InlineKeyboardButton("🌙 Evening Time", callback_data="set_evening")]
+            [InlineKeyboardButton("🌙 Evening Time", callback_data="set_evening")],
         ]
+        if has_calendar:
+            keyboard_rows.append([InlineKeyboardButton("🔌 Disconnect Google Calendar", callback_data="disconnect_gcal")])
+        else:
+            keyboard_rows.append([InlineKeyboardButton("🔗 Connect Google Calendar", callback_data="connect_gcal")])
+
+        keyboard = keyboard_rows
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.message.reply_text(
@@ -868,7 +932,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     
     elif waiting_for == 'reschedule_time':
-        # Обработка ручного ввода времени для переноса задачи
+        # Обработка ручного ввода времени (и при необходимости длительности) для переноса задачи
         event_id = context.user_data.get('rescheduling_event_id')
         if not event_id:
             await update.message.reply_text(
@@ -877,6 +941,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             context.user_data.pop('waiting_for', None)
             context.user_data.pop('rescheduling_event_id', None)
+            context.user_data.pop('reschedule_conflict_start', None)
             return
         
         # Получаем credentials
@@ -888,6 +953,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             context.user_data.pop('waiting_for', None)
             context.user_data.pop('rescheduling_event_id', None)
+            context.user_data.pop('reschedule_conflict_start', None)
             return
         
         credentials = await _get_credentials_or_notify(
@@ -897,11 +963,148 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not credentials:
             context.user_data.pop('waiting_for', None)
             context.user_data.pop('rescheduling_event_id', None)
+            context.user_data.pop('reschedule_conflict_start', None)
             return
         
         try:
-            # Используем AI для парсинга естественного языка (например, "Tomorrow 15:00", "Friday 10am")
             user_timezone = get_user_timezone(chat_id) or DEFAULT_TZ
+            tz = pytz.timezone(user_timezone)
+
+            from googleapiclient.discovery import build
+            service = build('calendar', 'v3', credentials=credentials)
+
+            def _get_conflicts_for_slot(start_local, end_local):
+                """Возвращает список конфликтующих событий в локальном времени пользователя."""
+                start_utc = start_local.astimezone(pytz.utc)
+                end_utc = end_local.astimezone(pytz.utc)
+                events_result = service.events().list(
+                    calendarId='primary',
+                    timeMin=start_utc.isoformat(),
+                    timeMax=end_utc.isoformat(),
+                    singleEvents=True,
+                    orderBy='startTime'
+                ).execute()
+                raw_events = events_result.get('items', [])
+                conflicts = []
+                for ev in raw_events:
+                    if ev.get('id') == event_id:
+                        continue
+                    ev_start_str = ev['start'].get('dateTime') or ev['start'].get('date')
+                    ev_end_str = ev['end'].get('dateTime') or ev['end'].get('date')
+                    if not ev_start_str or not ev_end_str:
+                        continue
+                    try:
+                        if 'T' in ev_start_str:
+                            ev_start = datetime.fromisoformat(ev_start_str.replace('Z', '+00:00'))
+                            if ev_start.tzinfo is None:
+                                ev_start = pytz.utc.localize(ev_start)
+                            ev_end = datetime.fromisoformat(ev_end_str.replace('Z', '+00:00'))
+                            if ev_end.tzinfo is None:
+                                ev_end = pytz.utc.localize(ev_end)
+                        else:
+                            # All-day event
+                            ev_start = tz.localize(datetime.strptime(ev_start_str, '%Y-%m-%d'))
+                            ev_end = tz.localize(datetime.strptime(ev_end_str, '%Y-%m-%d'))
+                        ev_start_local = ev_start.astimezone(tz)
+                        ev_end_local = ev_end.astimezone(tz)
+                    except Exception:
+                        continue
+                    # Проверяем пересечение интервалов
+                    if not (end_local <= ev_start_local or start_local >= ev_end_local):
+                        conflicts.append({
+                            "summary": ev.get("summary", "Busy"),
+                            "start": ev_start_local,
+                            "end": ev_end_local,
+                        })
+                return conflicts
+
+            # --- Вариант 1: пользователь меняет ДЛИТЕЛЬНОСТЬ при уже выбранном времени ---
+            conflict_start_iso = context.user_data.get('reschedule_conflict_start')
+            if conflict_start_iso and ':' not in text.strip():
+                try:
+                    new_duration_minutes = _parse_duration_to_minutes(text)
+                except ValueError:
+                    # Не похоже на длительность — будем трактовать как новое время
+                    pass
+                else:
+                    try:
+                        new_start_dt = datetime.fromisoformat(conflict_start_iso)
+                    except Exception:
+                        new_start_dt = None
+                    if new_start_dt is not None:
+                        if new_start_dt.tzinfo is None:
+                            new_start_dt = tz.localize(new_start_dt)
+                        new_end_dt = new_start_dt + timedelta(minutes=new_duration_minutes)
+
+                        conflicts = _get_conflicts_for_slot(new_start_dt, new_end_dt)
+                        if not conflicts:
+                            # Слот свободен с новой длительностью — переносим
+                            new_start_utc = new_start_dt.astimezone(pytz.utc)
+                            new_end_utc = new_end_dt.astimezone(pytz.utc)
+
+                            success = reschedule_event(credentials, event_id, new_start_utc, new_end_utc)
+                            if success:
+                                time_str = new_start_dt.strftime('%H:%M')
+                                date_str = new_start_dt.strftime('%Y-%m-%d')
+                                today_str = datetime.now(tz).strftime('%Y-%m-%d')
+                                if date_str == today_str:
+                                    time_display = f"today at {time_str}"
+                                elif date_str == (datetime.now(tz) + timedelta(days=1)).strftime('%Y-%m-%d'):
+                                    time_display = f"tomorrow at {time_str}"
+                                else:
+                                    time_display = f"{new_start_dt.strftime('%B %d')} at {time_str}"
+
+                                await update.message.reply_text(
+                                    f"✅ Task moved to {time_display} (duration {new_duration_minutes} min)!",
+                                    reply_markup=build_main_menu()
+                                )
+                                track_event(chat_id, "task_rescheduled_manual", {
+                                    "event_id": event_id,
+                                    "duration_minutes": new_duration_minutes,
+                                })
+                                context.user_data.pop('waiting_for', None)
+                                context.user_data.pop('rescheduling_event_id', None)
+                                context.user_data.pop('reschedule_conflict_start', None)
+                                return
+                            else:
+                                await update.message.reply_text(
+                                    "❌ Failed to reschedule. Please try again.",
+                                    reply_markup=build_main_menu()
+                                )
+                                context.user_data.pop('waiting_for', None)
+                                context.user_data.pop('rescheduling_event_id', None)
+                                context.user_data.pop('reschedule_conflict_start', None)
+                                return
+
+                        # Всё ещё конфликт — показываем детали и просим выбрать другое время/длительность
+                        lines = []
+                        for c in conflicts[:3]:
+                            lines.append(
+                                f"• {c['start'].strftime('%H:%M')}–{c['end'].strftime('%H:%M')} {c['summary']}"
+                            )
+                        if len(conflicts) > 3:
+                            lines.append("• ...")
+                        conflict_text = "⚠️ That duration still overlaps with other event(s):\n" + "\n".join(lines)
+                        conflict_text += (
+                            "\n\nSend another time (e.g., <b>tomorrow 15:00</b>) or a shorter duration "
+                            "(e.g., <b>30</b>, <b>45 min</b>)."
+                        )
+                        cancel_keyboard = InlineKeyboardMarkup([
+                            [InlineKeyboardButton("❌ Cancel reschedule", callback_data=f"cancel_reschedule_{event_id}")]
+                        ])
+                        context.user_data['reschedule_conflict_start'] = new_start_dt.isoformat()
+                        await update.message.reply_text(
+                            conflict_text,
+                            reply_markup=cancel_keyboard,
+                            parse_mode='HTML'
+                        )
+                        return
+
+            # --- Вариант 2: пользователь задаёт НОВОЕ ВРЕМЯ ---
+            # Если был конфликт раньше, но мы получили новый ввод времени, сбрасываем сохранённый старт
+            context.user_data.pop('reschedule_conflict_start', None)
+
+            # Используем AI для парсинга естественного языка (например, "Tomorrow 15:00", "Friday 10am")
             ai_parsed = await parse_with_ai(text, user_timezone)
 
             if not ai_parsed or not ai_parsed.get("is_task", True):
@@ -913,7 +1116,6 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                         hour = int(parts[0].strip())
                         minute = int(parts[1].strip()[:2])
                         if 0 <= hour <= 23 and 0 <= minute <= 59:
-                            tz = pytz.timezone(user_timezone)
                             now_local = datetime.now(tz)
                             candidate = now_local.replace(hour=hour, minute=minute, second=0, microsecond=0)
                             if candidate.tzinfo is None:
@@ -940,12 +1142,9 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                     start_dt = pytz.utc.localize(start_dt)
                 
                 # Конвертируем в локальный timezone
-                tz = pytz.timezone(user_timezone)
                 new_start_dt = start_dt.astimezone(tz)
             
             # Получаем событие для вычисления длительности
-            from googleapiclient.discovery import build
-            service = build('calendar', 'v3', credentials=credentials)
             event = service.events().get(calendarId='primary', eventId=event_id).execute()
             
             # Получаем длительность события
@@ -964,11 +1163,10 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 duration = timedelta(hours=1)
             
             new_end_dt = new_start_dt + duration
-            
-            # Проверяем доступность (исключаем само событие из проверки)
-            is_available = check_availability(credentials, new_start_dt, new_end_dt, exclude_event_id=event_id)
-            
-            if is_available:
+
+            conflicts = _get_conflicts_for_slot(new_start_dt, new_end_dt)
+
+            if not conflicts:
                 # Слот свободен - переносим событие
                 new_start_utc = new_start_dt.astimezone(pytz.utc)
                 new_end_utc = new_end_dt.astimezone(pytz.utc)
@@ -996,6 +1194,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                     # Очищаем состояние после успешного переноса
                     context.user_data.pop('waiting_for', None)
                     context.user_data.pop('rescheduling_event_id', None)
+                    context.user_data.pop('reschedule_conflict_start', None)
                 else:
                     await update.message.reply_text(
                         "❌ Failed to reschedule. Please try again.",
@@ -1004,25 +1203,38 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                     # Очищаем состояние при ошибке
                     context.user_data.pop('waiting_for', None)
                     context.user_data.pop('rescheduling_event_id', None)
+                    context.user_data.pop('reschedule_conflict_start', None)
             else:
-                # Слот занят - просим попробовать другое время с кнопкой отмены
+                # Слот занят — показываем детали и предлагаем другое время или длительность
+                lines = []
+                for c in conflicts[:3]:
+                    lines.append(
+                        f"• {c['start'].strftime('%H:%M')}–{c['end'].strftime('%H:%M')} {c['summary']}"
+                    )
+                if len(conflicts) > 3:
+                    lines.append("• ...")
+                conflict_text = "⚠️ That time overlaps with other event(s):\n" + "\n".join(lines)
+                conflict_text += (
+                    "\n\nSend another time (e.g., <b>tomorrow 15:00</b>) or a new duration for this task "
+                    "(e.g., <b>30</b>, <b>45 min</b>, <b>1h</b>)."
+                )
                 cancel_keyboard = InlineKeyboardMarkup([
                     [InlineKeyboardButton("❌ Cancel reschedule", callback_data=f"cancel_reschedule_{event_id}")]
                 ])
+                context.user_data['reschedule_conflict_start'] = new_start_dt.isoformat()
                 await update.message.reply_text(
-                    "⚠️ That time is busy. Try another time (e.g., <b>tomorrow 15:00</b>, <b>fri 10:00</b>):",
+                    conflict_text,
                     reply_markup=cancel_keyboard,
                     parse_mode='HTML'
                 )
-                # Оставляем waiting_for, чтобы пользователь мог ввести другое время
                 return
             
-        except (ValueError, IndexError, TypeError) as e:
+        except (ValueError, IndexError, TypeError):
             cancel_keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("❌ Cancel reschedule", callback_data=f"cancel_reschedule_{event_id}")]
             ])
             await update.message.reply_text(
-                "❌ Couldn't understand that time. Try: <b>today 18:00</b>, <b>tomorrow 10:00</b>, <b>wed 14:30</b>",
+                "❌ Couldn't understand that time or duration. Try: <b>today 18:00</b>, <b>tomorrow 10:00</b>, <b>wed 14:30</b> or a duration like <b>30</b>, <b>45 min</b>.",
                 reply_markup=cancel_keyboard,
                 parse_mode='HTML'
             )
@@ -1034,6 +1246,60 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             context.user_data.pop('waiting_for', None)
             context.user_data.pop('rescheduling_event_id', None)
+            context.user_data.pop('reschedule_conflict_start', None)
+        return
+    
+    elif waiting_for == 'task_duration':
+        # Пользователь отвечает на вопрос о длительности задачи
+        pending_event = context.user_data.get('pending_event_data')
+        pending_source = context.user_data.get('pending_event_source', 'text')
+        if not pending_event:
+            await update.message.reply_text(
+                "Sorry, I lost the task details. Please send the task again.",
+                reply_markup=build_main_menu()
+            )
+            context.user_data.pop('waiting_for', None)
+            context.user_data.pop('pending_event_source', None)
+            return
+
+        try:
+            duration_minutes = _parse_duration_to_minutes(text)
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Couldn't understand the duration. Examples:\n"
+                "<b>30</b>, <b>30 min</b>, <b>1h</b>, <b>1:30</b>, <b>45 минут</b>",
+                parse_mode='HTML'
+            )
+            return
+
+        try:
+            # Пересчитываем время окончания по указанной длительности
+            start_str = pending_event.get("start_time")
+            if not start_str:
+                raise ValueError("Missing start_time in pending task")
+            start_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+            if start_dt.tzinfo is None:
+                start_dt = pytz.utc.localize(start_dt)
+            end_dt = start_dt + timedelta(minutes=duration_minutes)
+
+            pending_event["end_time"] = end_dt.isoformat()
+            pending_event["duration_minutes"] = duration_minutes
+            pending_event["duration_was_inferred"] = False
+
+            # Очищаем состояние до создания события
+            context.user_data.pop('waiting_for', None)
+            context.user_data.pop('pending_event_data', None)
+            context.user_data.pop('pending_event_source', None)
+
+            await create_calendar_event(update, context, pending_event, source=pending_source)
+        except Exception:
+            await update.message.reply_text(
+                "❌ An error occurred while saving the task. Please try again.",
+                reply_markup=build_main_menu()
+            )
+            context.user_data.pop('waiting_for', None)
+            context.user_data.pop('pending_event_data', None)
+            context.user_data.pop('pending_event_source', None)
         return
     
     # Обработка онбординга
@@ -1383,7 +1649,31 @@ async def handle_schedule_import(update: Update, context: ContextTypes.DEFAULT_T
         )
         return
     
-    # Сохраняем расписание в user_data
+    # Удаляем возможные дубликаты событий, которые иногда может вернуть AI
+    unique_events = []
+    seen_keys = set()
+    for ev in events:
+        key = (
+            (ev.get("day_of_week") or "").strip(),
+            (ev.get("start_time") or "").strip(),
+            (ev.get("end_time") or "").strip(),
+            (ev.get("summary") or "").strip(),
+            (ev.get("location") or "").strip(),
+        )
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        unique_events.append(ev)
+    
+    events = unique_events
+    if not events:
+        await update.message.reply_text(
+            "❌ No valid events found in the schedule.",
+            reply_markup=build_main_menu()
+        )
+        return
+    
+    # Сохраняем расписание в user_data (уже без дубликатов)
     context.user_data['pending_schedule'] = events
     context.user_data['state'] = 'WAITING_FOR_WEEKS'
     
@@ -1557,6 +1847,248 @@ async def handle_weeks_response(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data.pop('pending_schedule', None)
 
 
+def _find_best_matching_event_for_text(events: List[Dict], text_lower: str, user_timezone: str) -> Optional[Dict]:
+    """
+    Находит событие, лучше всего соответствующее текстовому описанию пользователя.
+    Учитывает время, фрагменты названия и простые указания даты (today / tomorrow / сегодня / завтра).
+    """
+    if not events:
+        return None
+
+    tz = pytz.timezone(user_timezone)
+    now_local = datetime.now(tz)
+    today = now_local.date()
+    tomorrow = (now_local + timedelta(days=1)).date()
+
+    # Ищем времена формата HH:MM в тексте
+    time_matches = re.findall(r"\b(\d{1,2}):(\d{2})\b", text_lower)
+    times_in_text = []
+    for h_str, m_str in time_matches:
+        try:
+            h = int(h_str)
+            m = int(m_str)
+            if 0 <= h <= 23 and 0 <= m <= 59:
+                times_in_text.append((h, m))
+        except ValueError:
+            continue
+
+    best_event = None
+    best_score = 0
+
+    for ev in events:
+        summary = ev.get("summary", "") or ""
+        if summary.startswith("❌ "):
+            # Уже отменённые события пропускаем
+            continue
+
+        summary_lower = summary.lower()
+        if summary_lower.startswith("✅ "):
+            summary_lower = summary_lower[2:]
+
+        start_raw = ev.get("start_time") or ""
+        local_time_tuple = None
+        local_date = None
+
+        try:
+            if start_raw:
+                if "T" in start_raw:
+                    dt = datetime.fromisoformat(start_raw.replace("Z", "+00:00"))
+                    if dt.tzinfo is None:
+                        dt = pytz.utc.localize(dt)
+                    dt_local = dt.astimezone(tz)
+                    local_time_tuple = (dt_local.hour, dt_local.minute)
+                    local_date = dt_local.date()
+                else:
+                    # All-day event
+                    dt_local = tz.localize(datetime.strptime(start_raw, "%Y-%m-%d"))
+                    local_date = dt_local.date()
+        except Exception:
+            pass
+
+        score = 0
+
+        # Совпадение по времени
+        if times_in_text and local_time_tuple:
+            for (h, m) in times_in_text:
+                if h == local_time_tuple[0] and m == local_time_tuple[1]:
+                    score += 5
+                    break
+
+        # Совпадение по словам в summary
+        for token in summary_lower.split():
+            token = token.strip()
+            if token and token in text_lower:
+                score += 1
+
+        # Простые указания на дату
+        if local_date:
+            if ("today" in text_lower or "сегодня" in text_lower) and local_date == today:
+                score += 2
+            if ("tomorrow" in text_lower or "завтра" in text_lower) and local_date == tomorrow:
+                score += 2
+
+        if score > best_score:
+            best_score = score
+            best_event = ev
+
+    return best_event if best_score > 0 else None
+
+
+async def _try_handle_management_command(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, source: str) -> bool:
+    """
+    Пытается интерпретировать входящее сообщение как команду управления задачами
+    (отмена или перенос существующей задачи).
+    
+    Возвращает True, если сообщение было обработано здесь и не требует дальнейшей
+    обработки как новая задача.
+    """
+    chat_id = update.effective_chat.id
+    text_lower = text.lower()
+
+    is_cancel_cmd = any(
+        kw in text_lower
+        for kw in ["отмени", "отменить", "удали", "удалить", "cancel", "delete", "remove task", "cancel task"]
+    )
+    is_reschedule_cmd = any(
+        kw in text_lower
+        for kw in ["перенеси", "перенести", "перепланируй", "reschedule", "move task", "move my task"]
+    )
+
+    if not (is_cancel_cmd or is_reschedule_cmd):
+        return False
+
+    # Проверяем авторизацию Google Calendar
+    stored_tokens = get_google_tokens(chat_id)
+    if not stored_tokens:
+        await update.message.reply_text(
+            "❌ Please connect your Google Calendar first using /start",
+            reply_markup=build_main_menu()
+        )
+        return True
+
+    credentials = await _get_credentials_or_notify(
+        chat_id, stored_tokens,
+        lambda t: update.message.reply_text(t, reply_markup=build_main_menu())
+    )
+    if not credentials:
+        return True
+
+    user_timezone = get_user_timezone(chat_id) or DEFAULT_TZ
+    tz = pytz.timezone(user_timezone)
+    now_local = datetime.now(tz)
+
+    # Собираем события на сегодня и ближайшие 6 дней
+    events: List[Dict] = []
+    try:
+        events.extend(get_today_events(credentials, user_timezone))
+        for offset in range(1, 7):
+            target_date = (now_local + timedelta(days=offset)).date()
+            events.extend(get_events_for_date(credentials, user_timezone, target_date))
+    except Exception as e:
+        print(f"[Bot] Ошибка при загрузке событий для команды управления задачами: {e}")
+        await update.message.reply_text(
+            "❌ Couldn't load your tasks. Please try again.",
+            reply_markup=build_main_menu()
+        )
+        return True
+
+    if not events:
+        await update.message.reply_text(
+            "I couldn't find any tasks in the next 7 days.",
+            reply_markup=build_main_menu()
+        )
+        return True
+
+    best_event = _find_best_matching_event_for_text(events, text_lower, user_timezone)
+    if not best_event:
+        await update.message.reply_text(
+            "I couldn't find which task you meant. Please mention the time and title, "
+            "for example: <b>\"cancel 16:00 gym\"</b> or <b>\"перенеси завтра 18:00 тренировку\"</b>.",
+            parse_mode='HTML',
+            reply_markup=build_main_menu()
+        )
+        return True
+
+    event_id = best_event.get("id")
+    if not event_id:
+        await update.message.reply_text(
+            "I found a matching task but couldn't read its ID. Please try again using the buttons.",
+            reply_markup=build_main_menu()
+        )
+        return True
+
+    # Формируем человеко-понятное описание найденной задачи
+    summary = best_event.get("summary", "Task")
+    start_raw = best_event.get("start_time") or ""
+    time_str = ""
+    date_str = ""
+    try:
+        if start_raw:
+            if "T" in start_raw:
+                dt = datetime.fromisoformat(start_raw.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = pytz.utc.localize(dt)
+                dt_local = dt.astimezone(tz)
+                time_str = dt_local.strftime("%H:%M")
+                date_str = dt_local.strftime("%Y-%m-%d")
+            else:
+                dt_local = tz.localize(datetime.strptime(start_raw, "%Y-%m-%d"))
+                date_str = dt_local.strftime("%Y-%m-%d")
+    except Exception:
+        pass
+
+    label = summary
+    if time_str and date_str:
+        label = f"{date_str} {time_str} — {summary}"
+    elif time_str:
+        label = f"{time_str} — {summary}"
+
+    if is_cancel_cmd and not is_reschedule_cmd:
+        # Отмена задачи
+        try:
+            success = cancel_event(credentials, event_id)
+            if success:
+                await update.message.reply_text(
+                    f"✅ Task cancelled: {label}",
+                    reply_markup=build_main_menu()
+                )
+                track_event(chat_id, "task_cancelled_nl", {"event_id": event_id, "source": source})
+            else:
+                await update.message.reply_text(
+                    "❌ Failed to cancel the task. Please try again or use the buttons.",
+                    reply_markup=build_main_menu()
+                )
+        except Exception as e:
+            print(f"[Bot] Ошибка при отмене задачи через естественный язык: {e}")
+            await update.message.reply_text(
+                "❌ An error occurred while cancelling the task. Please try again.",
+                reply_markup=build_main_menu()
+            )
+        return True
+
+    # Перенос задачи (если есть хотя бы один триггер переноса)
+    if is_reschedule_cmd:
+        context.user_data['rescheduling_event_id'] = event_id
+        context.user_data['waiting_for'] = 'reschedule_time'
+
+        cancel_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Cancel reschedule", callback_data=f"cancel_reschedule_{event_id}")]
+        ])
+
+        await update.message.reply_text(
+            f"📅 I found this task:\n<b>{label}</b>\n\n"
+            "For what time to reschedule?\n\n"
+            "Examples: <b>today 18:00</b>, <b>tomorrow 10:00</b>, <b>wed 14:30</b>, <b>15:00</b>",
+            reply_markup=cancel_keyboard,
+            parse_mode='HTML'
+        )
+        track_event(chat_id, "task_reschedule_nl_started", {"event_id": event_id, "source": source})
+        return True
+
+    # Если дошли сюда, но не обработали — ничего не делаем
+    return False
+
+
 async def process_task(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, source: str):
     """Обрабатывает задачу (текст или транскрибированный голос)"""
     chat_id = update.effective_chat.id
@@ -1566,6 +2098,11 @@ async def process_task(update: Update, context: ContextTypes.DEFAULT_TYPE, text:
     track_event(chat_id, "message_received", {"source": source, "text_length": len(text)})
     
     try:
+        # Сначала пробуем интерпретировать сообщение как команду управления задачами
+        handled = await _try_handle_management_command(update, context, text, source)
+        if handled:
+            return
+        
         # Определяем язык (простая проверка на кириллицу)
         source_language = "ru" if any('\u0400' <= char <= '\u04FF' for char in text) else "en"
         
@@ -1611,7 +2148,23 @@ async def process_task(update: Update, context: ContextTypes.DEFAULT_TYPE, text:
             "has_location": bool(ai_parsed.get("location"))
         })
         
-        # Создаем событие в календаре
+        # Если модель использовала дефолтную длительность (или не указала флаг),
+        # запрашиваем её у пользователя явно. При отсутствии поля считаем,
+        # что длительность была "угадана", а не явно указана.
+        duration_inferred = bool(ai_parsed.get("duration_was_inferred", True))
+        if duration_inferred:
+            context.user_data['waiting_for'] = 'task_duration'
+            context.user_data['pending_event_data'] = ai_parsed
+            context.user_data['pending_event_source'] = source
+
+            await update.message.reply_text(
+                "⏱ Please specify how long this task will take.\n\n"
+                "Examples: <b>30</b>, <b>30 min</b>, <b>1h</b>, <b>1:30</b>, <b>45 минут</b>",
+                parse_mode='HTML'
+            )
+            return
+        
+        # Иначе сразу создаём событие в календаре
         await create_calendar_event(update, context, ai_parsed, source=source)
         
     except Exception as e:
@@ -1954,6 +2507,37 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             reply_markup=build_evening_time_keyboard()
         )
         context.user_data['waiting_for'] = 'evening_time'
+        return
+
+    elif callback_data == "connect_gcal":
+        await query.answer("")  # тихий ответ
+        chat_id = query.message.chat_id
+        # Формируем redirect_uri для callback (используем ту же логику, что и в main())
+        base_url = os.getenv("BASE_URL")
+        if not base_url:
+            port = int(os.getenv("PORT", 8000))
+            base_url = f"http://localhost:{port}"
+        redirect_uri = f"{base_url}/google/callback"
+
+        auth_url = get_authorization_url(chat_id, redirect_uri)
+        await query.edit_message_text(
+            "To (re)connect your Google Calendar, click the link below:\n\n"
+            f'<a href="{auth_url}">🔗 Connect Google Calendar</a>',
+            parse_mode='HTML'
+        )
+        return
+
+    elif callback_data == "disconnect_gcal":
+        await query.answer("")  # тихий ответ
+        chat_id = query.message.chat_id
+        # Удаляем токены и помечаем, что онбординг по календарю больше не активен
+        delete_google_tokens(chat_id)
+        set_onboarded(chat_id, False)
+
+        await query.edit_message_text(
+            "🔌 Google Calendar has been disconnected.\n\n"
+            "You can connect a new account at any time from Settings or by typing /start.",
+        )
         return
 
     # Для остальных callback нужна авторизация Google Calendar
@@ -2372,6 +2956,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         # Always clear reschedule state regardless of which event triggered cancel
         context.user_data.pop('waiting_for', None)
         context.user_data.pop('rescheduling_event_id', None)
+        context.user_data.pop('reschedule_conflict_start', None)
         await query.edit_message_text("❌ Reschedule cancelled.")
         await query.answer("")
 

@@ -186,17 +186,31 @@ CRITICAL RULES:
                 if "day_of_week" not in event or "start_time" not in event:
                     continue
                 
-                # Нормализуем день недели
-                day = event["day_of_week"].strip().capitalize()
+                # Нормализуем день недели (поддерживаем английский, итальянский и русский)
+                raw_day = str(event["day_of_week"]).strip()
+                # Сначала пытаемся привести к единообразному виду без учёта регистра
+                day_norm = raw_day.lower()
                 day_mapping = {
-                    "Lunedì": "Monday", "Martedì": "Tuesday", "Mercoledì": "Wednesday",
-                    "Giovedì": "Thursday", "Venerdì": "Friday", "Sabato": "Saturday", "Domenica": "Sunday",
-                    "Lun": "Monday", "Mar": "Tuesday", "Mer": "Wednesday", "Gio": "Thursday",
-                    "Ven": "Friday", "Sab": "Saturday", "Dom": "Sunday",
-                    "Mon": "Monday", "Tue": "Tuesday", "Wed": "Wednesday", "Thu": "Thursday",
-                    "Fri": "Friday", "Sat": "Saturday", "Sun": "Sunday"
+                    # Italian full
+                    "lunedì": "Monday", "martedì": "Tuesday", "mercoledì": "Wednesday",
+                    "giovedì": "Thursday", "venerdì": "Friday", "sabato": "Saturday", "domenica": "Sunday",
+                    # Italian short
+                    "lun": "Monday", "mar": "Tuesday", "mer": "Wednesday", "gio": "Thursday",
+                    "ven": "Friday", "sab": "Saturday", "dom": "Sunday",
+                    # English full
+                    "monday": "Monday", "tuesday": "Tuesday", "wednesday": "Wednesday",
+                    "thursday": "Thursday", "friday": "Friday", "saturday": "Saturday", "sunday": "Sunday",
+                    # English short
+                    "mon": "Monday", "tue": "Tuesday", "wed": "Wednesday", "thu": "Thursday",
+                    "fri": "Friday", "sat": "Saturday", "sun": "Sunday",
+                    # Russian full
+                    "понедельник": "Monday", "вторник": "Tuesday", "среда": "Wednesday",
+                    "четверг": "Thursday", "пятница": "Friday", "суббота": "Saturday", "воскресенье": "Sunday",
+                    # Russian short
+                    "пн": "Monday", "вт": "Tuesday", "ср": "Wednesday",
+                    "чт": "Thursday", "пт": "Friday", "сб": "Saturday", "вс": "Sunday",
                 }
-                day = day_mapping.get(day, day)
+                day = day_mapping.get(day_norm, raw_day.capitalize())
                 
                 if day not in day_names:
                     continue
@@ -306,7 +320,9 @@ JSON structure for SINGLE TASK:
     "start_time": "ISO 8601 format (YYYY-MM-DDTHH:MM:SS+00:00 or YYYY-MM-DDTHH:MM:SSZ)",
     "end_time": "ISO 8601 format (YYYY-MM-DDTHH:MM:SS+00:00 or YYYY-MM-DDTHH:MM:SSZ)",
     "description": "detailed task description (can be empty, keep original language)",
-    "location": "location if mentioned (can be empty string)"
+    "location": "location if mentioned (can be empty string)",
+    "duration_minutes": integer,              // total duration in minutes (end_time - start_time)
+    "duration_was_inferred": bool            // true if user did NOT explicitly specify duration and you used a default guess
 }
 
 JSON structure for RECURRING WEEKLY SCHEDULE:
@@ -332,15 +348,16 @@ CRITICAL RULES:
 5. If user specified only date without time, use 09:00 as start time and 09:30 as end time.
 6. If user specified only time without date (e.g., "Meeting at 15:00"), use TODAY if that time has NOT passed yet, otherwise use TOMORROW.
 7. If time is in the past, move to tomorrow.
-8. For single tasks: All times must be in UTC (convert from user timezone).
-9. Default duration is 30 minutes (end_time = start_time + 30 minutes).
-10. summary should be brief (up to 100 characters).
-11. description can be empty string if no additional details.
-12. location can be empty string if not mentioned.
-13. If input text is in Russian, keep summary and description in Russian. Otherwise use English.
-14. Be VERY strict: if the message is unclear, ambiguous, doesn't contain a clear action/task, or looks like random text/characters (e.g., "Cheche tv 000000"), set "is_task": false.
-15. A valid task must contain at least one action verb (e.g., "buy", "call", "meet", "go", "do", "make", "send", "write", etc.) or a clear event description.
-16. Random words, numbers, or character sequences without clear meaning are NOT tasks.
+8. For single tasks: All times must be in the USER'S LOCAL TIMEZONE with the correct numeric UTC offset (e.g., "2026-03-10T14:00:00+03:00"). DO NOT convert times to pure UTC yourself; keep the local offset.
+9. Default duration is 30 minutes (end_time = start_time + 30 minutes) ONLY when the user did NOT explicitly specify duration. In that case set "duration_was_inferred": true. If the user clearly specifies duration (e.g., "for 2 hours", "1.5h", "for 45 minutes"), compute end_time accordingly and set "duration_was_inferred": false.
+10. Always set "duration_minutes" = total duration in minutes (end_time - start_time), even if the user did not specify duration explicitly.
+11. summary should be brief (up to 100 characters).
+12. description can be empty string if no additional details.
+13. location can be empty string if not mentioned.
+14. If input text is in Russian, keep summary and description in Russian. Otherwise use English.
+15. Be VERY strict: if the message is unclear, ambiguous, doesn't contain a clear action/task, or looks like random text/characters (e.g., "Cheche tv 000000"), set "is_task": false.
+16. A valid task must contain at least one action verb (e.g., "buy", "call", "meet", "go", "do", "make", "send", "write", etc.) or a clear event description.
+17. Random words, numbers, or character sequences without clear meaning are NOT tasks.
 
 IMPORTANT: Return ONLY valid JSON, no markdown formatting, no backticks, no additional text."""
 
@@ -350,8 +367,7 @@ UTC offset: {utc_offset_fmt}
 User timezone: {user_timezone}
 Current UTC time: {now_utc.strftime('%Y-%m-%dT%H:%M:%SZ')}
 
-IMPORTANT: When the user says a time (e.g. "14:00"), treat it as LOCAL time in the user's timezone (UTC offset {utc_offset_fmt}). Convert it to UTC for the output.
-Example: if UTC offset is +03:00 and user says "14:00", the UTC time is 11:00 (14:00 - 3h = 11:00 UTC).
+IMPORTANT: When the user says a time (e.g. "14:00"), treat it as LOCAL time in the user's timezone (UTC offset {utc_offset_fmt}). Your output start_time and end_time MUST also be in the SAME LOCAL TIMEZONE with the SAME offset (e.g. +03:00). Do NOT subtract the offset or convert to pure UTC yourself — just attach the correct local offset. The calling code will convert to UTC later.
 
 Task: {text}
 
@@ -400,18 +416,31 @@ Return JSON with task information."""
                 if "day_of_week" not in event or "start_time" not in event:
                     continue
                 
-                # Нормализуем день недели
-                day = event["day_of_week"].strip().capitalize()
+                # Нормализуем день недели (английский, итальянский, русский)
+                raw_day = str(event["day_of_week"]).strip()
+                day_norm = raw_day.lower()
                 # Маппинг для разных языков
                 day_mapping = {
-                    "Lunedì": "Monday", "Martedì": "Tuesday", "Mercoledì": "Wednesday",
-                    "Giovedì": "Thursday", "Venerdì": "Friday", "Sabato": "Saturday", "Domenica": "Sunday",
-                    "Lun": "Monday", "Mar": "Tuesday", "Mer": "Wednesday", "Gio": "Thursday",
-                    "Ven": "Friday", "Sab": "Saturday", "Dom": "Sunday",
-                    "Mon": "Monday", "Tue": "Tuesday", "Wed": "Wednesday", "Thu": "Thursday",
-                    "Fri": "Friday", "Sat": "Saturday", "Sun": "Sunday"
+                    # Italian full
+                    "lunedì": "Monday", "martedì": "Tuesday", "mercoledì": "Wednesday",
+                    "giovedì": "Thursday", "venerdì": "Friday", "sabato": "Saturday", "domenica": "Sunday",
+                    # Italian short
+                    "lun": "Monday", "mar": "Tuesday", "mer": "Wednesday", "gio": "Thursday",
+                    "ven": "Friday", "sab": "Saturday", "dom": "Sunday",
+                    # English full
+                    "monday": "Monday", "tuesday": "Tuesday", "wednesday": "Wednesday",
+                    "thursday": "Thursday", "friday": "Friday", "saturday": "Saturday", "sunday": "Sunday",
+                    # English short
+                    "mon": "Monday", "tue": "Tuesday", "wed": "Wednesday", "thu": "Thursday",
+                    "fri": "Friday", "sat": "Saturday", "sun": "Sunday",
+                    # Russian full
+                    "понедельник": "Monday", "вторник": "Tuesday", "среда": "Wednesday",
+                    "четверг": "Thursday", "пятница": "Friday", "суббота": "Saturday", "воскресенье": "Sunday",
+                    # Russian short
+                    "пн": "Monday", "вт": "Tuesday", "ср": "Wednesday",
+                    "чт": "Thursday", "пт": "Friday", "сб": "Saturday", "вс": "Sunday",
                 }
-                day = day_mapping.get(day, day)
+                day = day_mapping.get(day_norm, raw_day.capitalize())
                 
                 if day not in day_names:
                     continue
@@ -487,7 +516,7 @@ Return JSON with task information."""
             start_dt = datetime.fromisoformat(parsed_data["start_time"].replace("Z", "+00:00"))
             end_dt = datetime.fromisoformat(parsed_data["end_time"].replace("Z", "+00:00"))
             
-            # Нормализуем timezone
+            # Нормализуем timezone: конвертируем в UTC для внутреннего хранения
             if start_dt.tzinfo is None:
                 start_dt = pytz.utc.localize(start_dt)
             else:
@@ -509,7 +538,27 @@ Return JSON with task information."""
             if end_dt < start_dt:
                 end_dt = start_dt + timedelta(minutes=30)
             
-            # Сохраняем в ISO формате
+            # Вычисляем длительность и нормализуем duration_* поля
+            duration_td = end_dt - start_dt
+            duration_minutes_actual = max(int(duration_td.total_seconds() // 60), 1)
+            # Если модель вернула duration_minutes, уважаем его, но используем фактическую длительность как fallback
+            try:
+                model_duration = int(parsed_data.get("duration_minutes", duration_minutes_actual))
+                if model_duration <= 0:
+                    model_duration = duration_minutes_actual
+            except (TypeError, ValueError):
+                model_duration = duration_minutes_actual
+            parsed_data["duration_minutes"] = model_duration
+
+            # duration_was_inferred может отсутствовать. Если поле отсутствует,
+            # безопаснее считать, что длительность была НЕ явно указана пользователем
+            # и спросить её отдельно.
+            if "duration_was_inferred" in parsed_data:
+                parsed_data["duration_was_inferred"] = bool(parsed_data["duration_was_inferred"])
+            else:
+                parsed_data["duration_was_inferred"] = True
+            
+            # Сохраняем нормализованные времена в ISO формате (UTC)
             parsed_data["start_time"] = start_dt.isoformat()
             parsed_data["end_time"] = end_dt.isoformat()
             
