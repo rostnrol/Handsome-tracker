@@ -341,7 +341,12 @@ JSON structure for RECURRING WEEKLY SCHEDULE:
 }
 
 CRITICAL RULES:
-1. DETECT RECURRING SCHEDULES: If text contains multiple events with days of week (e.g., "Monday 10:00 Math, Wednesday 14:00 History", "Mercoledì 12:15 Aula 4A, Giovedì 12:15 Aula 4A"), set "is_recurring_schedule": true and return the events array. Each event must have day_of_week (normalized to English), start_time and end_time in HH:MM format.
+1. DETECT RECURRING SCHEDULES: If text contains multiple events with days of week (e.g., "Monday 10:00 Math, Wednesday 14:00 History", "Mercoledì 12:15 Aula 4A, Giovedì 12:15 Aula 4A", "statistics\nMercoledì 12:15 - 13:45"), set "is_recurring_schedule": true and return the events array. Each event must have day_of_week (normalized to English), start_time and end_time in HH:MM format.
+1a. **CRITICAL for class schedules**: If the text STARTS with one or more lines that don't contain a day of week or time (these are the class/subject name lines), followed by schedule entries with days and times, extract the subject name from those initial lines and use it as the "summary" for ALL events in the schedule. Examples:
+   - Input: "statistics\nMercoledì 12:15 - 13:45 Aula 4A" → all events get "summary": "statistics"
+   - Input: "Math - Advanced\nMonday 10:00 - 11:30, Wednesday 14:00 - 15:30" → all events get "summary": "Math - Advanced"
+   - Input: "Chemistry Lab\nLunedì 09:00 - 10:30, Mercoledì 09:00 - 10:30" → all events get "summary": "Chemistry Lab"
+   **IMPORTANT**: Always extract and use the first non-schedule line(s) as the subject name for recurring schedules. This is the most common format for class timetables.
 2. For SINGLE TASKS: If the message does NOT look like a task (e.g., "Hello", "How are you", "Thanks", greetings, casual conversation, random words, questions without action, random characters like "000000", meaningless text), set "is_task": false and return minimal valid JSON.
 3. If "is_task": false, you can set summary to empty string, but still provide valid ISO times (use tomorrow 09:00 as default).
 4. If user did NOT specify time explicitly (e.g., "Buy milk", "Call John"), set the task to TOMORROW at 09:00 (default morning slot).

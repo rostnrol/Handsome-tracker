@@ -104,13 +104,12 @@ def _build_task_row(event_id: str, label_text: str) -> list:
 
 def _parse_duration_to_minutes(text: str) -> int:
     """
-    Парсит длительность задачи из текста и возвращает количество минут.
-    Поддерживаемые форматы:
-    - "30" (минуты)
+    Parses task duration from text and returns the number of minutes.
+    Supported formats:
+    - "30" (minutes)
     - "30m", "30 min", "30 minutes"
     - "1h", "1 h", "1 hour", "2.5h"
-    - "1:30" (часы:минуты)
-    - Русские варианты: "30 мин", "1 час", "1.5 часа" и т.п.
+    - "1:30" (hours:minutes)
     """
     s = text.strip().lower()
     if not s:
@@ -118,7 +117,7 @@ def _parse_duration_to_minutes(text: str) -> int:
 
     s = s.replace(",", ".")
 
-    # Формат H:MM (например, 1:30)
+    # Format H:MM (e.g., 1:30)
     if ":" in s:
         parts = s.split(":")
         if len(parts) == 2 and parts[0].strip() and parts[1].strip():
@@ -131,22 +130,22 @@ def _parse_duration_to_minutes(text: str) -> int:
             except ValueError:
                 pass
 
-    # Форматы с часами, например "1.5h", "2 часа"
-    hour_match = re.search(r"(\d+(\.\d+)?)\s*(h|hr|hour|hours|ч|час|часа|часов)\b", s)
+    # Hour formats, e.g., "1.5h", "2 hours"
+    hour_match = re.search(r"(\d+(\.\d+)?)\s*(h|hr|hour|hours)\b", s)
     if hour_match:
         hours = float(hour_match.group(1))
         total = int(hours * 60)
         if total > 0:
             return total
 
-    # Форматы с минутами, например "30m", "45 мин"
-    minute_match = re.search(r"(\d+)\s*(m|min|mins|minute|minutes|мин|минут|минуты)\b", s)
+    # Minute formats, e.g., "30m", "45 min"
+    minute_match = re.search(r"(\d+)\s*(m|min|mins|minute|minutes)\b", s)
     if minute_match:
         minutes = int(minute_match.group(1))
         if minutes > 0:
             return minutes
 
-    # Чистое число — интерпретируем как минуты
+    # Plain number — interpret as minutes
     if s.isdigit():
         minutes = int(s)
         if minutes > 0:
@@ -1270,7 +1269,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         except ValueError:
             await update.message.reply_text(
                 "❌ Couldn't understand the duration. Examples:\n"
-                "<b>30</b>, <b>30 min</b>, <b>1h</b>, <b>1:30</b>, <b>45 минут</b>",
+                "<b>30</b>, <b>30 min</b>, <b>1h</b>, <b>1:30</b>",
                 parse_mode='HTML'
             )
             return
