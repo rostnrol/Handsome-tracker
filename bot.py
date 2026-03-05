@@ -654,12 +654,15 @@ async def finish_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Завершение онбординга - подключение Google Calendar"""
     chat_id = update.effective_chat.id
     
-    # Формируем redirect_uri для callback (используем тот же логику, что и в main())
-    base_url = os.getenv("BASE_URL")
-    if not base_url:
-        port = int(os.getenv("PORT", 8000))
-        base_url = f"http://localhost:{port}"
-    redirect_uri = f"{base_url}/google/callback"
+    # Формируем redirect_uri для callback.
+    # Если задана REDIRECT_URI, используем её (должна в точности совпадать с настройкой в Google Cloud).
+    redirect_uri = os.getenv("REDIRECT_URI")
+    if not redirect_uri:
+        base_url = os.getenv("BASE_URL")
+        if not base_url:
+            port = int(os.getenv("PORT", 8000))
+            base_url = f"http://localhost:{port}"
+        redirect_uri = f"{base_url}/google/callback"
     
     # Генерируем URL авторизации с chat_id в state
     auth_url = get_authorization_url(chat_id, redirect_uri)
@@ -2512,12 +2515,14 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     elif callback_data == "connect_gcal":
         await query.answer("")  # тихий ответ
         chat_id = query.message.chat_id
-        # Формируем redirect_uri для callback (используем ту же логику, что и в main())
-        base_url = os.getenv("BASE_URL")
-        if not base_url:
-            port = int(os.getenv("PORT", 8000))
-            base_url = f"http://localhost:{port}"
-        redirect_uri = f"{base_url}/google/callback"
+        # Формируем redirect_uri для callback.
+        redirect_uri = os.getenv("REDIRECT_URI")
+        if not redirect_uri:
+            base_url = os.getenv("BASE_URL")
+            if not base_url:
+                port = int(os.getenv("PORT", 8000))
+                base_url = f"http://localhost:{port}"
+            redirect_uri = f"{base_url}/google/callback"
 
         auth_url = get_authorization_url(chat_id, redirect_uri)
         await query.edit_message_text(
@@ -3254,7 +3259,10 @@ def main():
                     text="Error: Invalid state parameter",
                     status=400
                 )
-            redirect_uri = f"{base_url}/google/callback"
+            # Формируем redirect_uri: сначала пробуем REDIRECT_URI, иначе BASE_URL/google/callback
+            redirect_uri = os.getenv("REDIRECT_URI")
+            if not redirect_uri:
+                redirect_uri = f"{base_url}/google/callback"
             
             # Обмениваем код на токены
             tokens = exchange_code_for_tokens(code, redirect_uri)

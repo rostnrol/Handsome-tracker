@@ -82,6 +82,11 @@ def exchange_code_for_tokens(auth_code: str, redirect_uri: str) -> Optional[Dict
     if not client_id or not client_secret:
         raise ValueError("GOOGLE_CLIENT_ID и GOOGLE_CLIENT_SECRET должны быть установлены")
     
+    # Позволяем жёстко задать redirect_uri через REDIRECT_URI, чтобы он
+    # в точности совпадал с настройками в Google Cloud и не зависел от схемы Render.
+    env_redirect_uri = os.getenv("REDIRECT_URI")
+    effective_redirect_uri = env_redirect_uri or redirect_uri
+    
     try:
         flow = Flow.from_client_config(
             {
@@ -90,12 +95,15 @@ def exchange_code_for_tokens(auth_code: str, redirect_uri: str) -> Optional[Dict
                     "client_secret": client_secret,
                     "auth_uri": "https://accounts.google.com/o/oauth2/auth",
                     "token_uri": "https://oauth2.googleapis.com/token",
-                    "redirect_uris": [redirect_uri]
+                    "redirect_uris": [effective_redirect_uri]
                 }
             },
             scopes=SCOPES,
-            redirect_uri=redirect_uri
+            redirect_uri=effective_redirect_uri
         )
+        
+        # CRITICAL: принудительно устанавливаем redirect_uri
+        flow.redirect_uri = effective_redirect_uri
         
         # Обмениваем код на токены
         flow.fetch_token(code=auth_code)
@@ -121,7 +129,11 @@ def exchange_code_for_tokens(auth_code: str, redirect_uri: str) -> Optional[Dict
         print(f"[Calendar Service] Токены успешно получены, refresh_token={'есть' if tokens_dict.get('refresh_token') else 'отсутствует'}, client_secret={'есть' if tokens_dict.get('client_secret') else 'отсутствует'}")
         return tokens_dict
     except Exception as e:
-        print(f"[Calendar Service] Ошибка при обмене кода на токены: {e}")
+        # Расширенный лог для упрощения отладки
+        print("[Calendar Service] Ошибка при обмене кода на токены")
+        print(f"[Calendar Service] redirect_uri used: {effective_redirect_uri}")
+        print(f"[Calendar Service] Exception type: {type(e).__name__}")
+        print(f"[Calendar Service] Exception details: {e}")
         return None
 
 
