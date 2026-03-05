@@ -6,14 +6,19 @@ import json
 from typing import Optional, Dict, Tuple
 from datetime import datetime
 import pytz
+import urllib.parse
+import requests
+import logging
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from services.db_service import save_google_tokens, delete_google_tokens
+
+# Setup logging - will inherit parent logger configuration if available
+logger = logging.getLogger(__name__)
 
 
 # Конфигурация OAuth2
@@ -24,6 +29,7 @@ SCOPES = ['https://www.googleapis.com/auth/calendar.events']
 def get_authorization_url(user_id: int, redirect_uri: str) -> str:
     """
     Генерирует URL для авторизации пользователя в Google Calendar.
+    Использует прямой HTTP формат вместо Flow.authorization_url() чтобы избежать PKCE нарушений.
     
     Args:
         user_id: ID пользователя Telegram
@@ -33,40 +39,32 @@ def get_authorization_url(user_id: int, redirect_uri: str) -> str:
         URL для авторизации
     """
     client_id = os.getenv("GOOGLE_CLIENT_ID")
-    client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
     
-    if not client_id or not client_secret:
+    if not client_id:
         # Возвращаем заглушку для тестирования
-        return f"https://accounts.google.com/o/oauth2/auth?client_id=SETUP_REQUIRED&redirect_uri={redirect_uri}&scope=https://www.googleapis.com/auth/calendar.events&response_type=code&state={user_id}"
+        logger.warning("GOOGLE_CLIENT_ID не установлен")
+        return f"https://accounts.google.com/o/oauth2/v2/auth?client_id=SETUP_REQUIRED&redirect_uri={redirect_uri}&scope=https://www.googleapis.com/auth/calendar.events&response_type=code&state={user_id}"
     
-    # Создаем flow для OAuth2
-    flow = Flow.from_client_config(
-        {
-            "web": {
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                "token_uri": "https://oauth2.googleapis.com/token",
-                "redirect_uris": [redirect_uri]
-            }
-        },
-        scopes=SCOPES,
-        redirect_uri=redirect_uri
-    )
+    # Строим параметры без PKCE (чтобы избежать mismatch code_challenge/code_verifier)
+    params = {
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": "https://www.googleapis.com/auth/calendar.events",
+        "access_type": "offline",
+        "prompt": "consent",
+        "state": str(user_id)  # Сохраняем user_id в state для безопасности
+    }
     
-    # Генерируем URL авторизации
-    authorization_url, _ = flow.authorization_url(
-        access_type='offline',
-        include_granted_scopes='true',
-        state=str(user_id)  # Сохраняем user_id в state для безопасности
-    )
-    
-    return authorization_url
+    auth_url = "https://accounts.google.com/o/oauth2/v2/auth?" + urllib.parse.urlencode(params)
+    logger.info(f"Generated authorization URL for user_id={user_id}")
+    return auth_url
 
 
 def exchange_code_for_tokens(auth_code: str, redirect_uri: str) -> Optional[Dict[str, str]]:
     """
     Обменивает authorization code на access_token и refresh_token.
+    Использует прямой HTTP запрос вместо Flow.fetch_token() чтобы избежать PKCE нарушений.
     
     Args:
         auth_code: Код авторизации от Google
@@ -80,6 +78,7 @@ def exchange_code_for_tokens(auth_code: str, redirect_uri: str) -> Optional[Dict
     client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
     
     if not client_id or not client_secret:
+        logger.error("GOOGLE_CLIENT_ID и GOOGLE_CLIENT_SECRET должны быть установлены")
         raise ValueError("GOOGLE_CLIENT_ID и GOOGLE_CLIENT_SECRET должны быть установлены")
     
     # Позволяем жёстко задать redirect_uri через REDIRECT_URI, чтобы он
@@ -88,52 +87,60 @@ def exchange_code_for_tokens(auth_code: str, redirect_uri: str) -> Optional[Dict
     effective_redirect_uri = env_redirect_uri or redirect_uri
     
     try:
-        flow = Flow.from_client_config(
-            {
-                "web": {
-                    "client_id": client_id,
-                    "client_secret": client_secret,
-                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                    "token_uri": "https://oauth2.googleapis.com/token",
-                    "redirect_uris": [effective_redirect_uri]
-                }
+        # Обмениваем код на токены напрямую через HTTP (без PKCE)
+        token_response = requests.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "code": auth_code,
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "redirect_uri": effective_redirect_uri,
+                "grant_type": "authorization_code"
             },
-            scopes=SCOPES,
-            redirect_uri=effective_redirect_uri
+            timeout=10
         )
         
-        # CRITICAL: принудительно устанавливаем redirect_uri
-        flow.redirect_uri = effective_redirect_uri
+        token_data = token_response.json()
         
-        # Обмениваем код на токены
-        flow.fetch_token(code=auth_code)
+        if "error" in token_data:
+            error_msg = token_data.get('error_description', token_data.get('error'))
+            logger.error(f"🚨 Google OAuth Error: {error_msg}")
+            logger.error(f"Full response: {token_data}")
+            return None
         
-        credentials = flow.credentials
+        # Проверяем наличие необходимых полей
+        if not token_data.get("access_token"):
+            logger.error("Missing access_token in Google response")
+            return None
         
-        # Проверяем наличие refresh_token
-        if not credentials.refresh_token:
-            print(f"[Calendar Service] ВНИМАНИЕ: refresh_token отсутствует в ответе от Google!")
-            print(f"[Calendar Service] Это может произойти, если пользователь уже авторизовал приложение ранее.")
+        # Проверяем наличие refresh_token (должен быть при offline access)
+        refresh_token = token_data.get("refresh_token")
+        if not refresh_token:
+            logger.warning("ВНИМАНИЕ: refresh_token отсутствует в ответе от Google!")
+            logger.warning("Это может произойти, если пользователь уже авторизовал приложение ранее.")
         
-        # ВАЖНО: credentials.client_secret может быть None, потому что Google не возвращает его в credentials
-        # Используем client_secret из переменных окружения, который нам нужен для refresh токена
         # Возвращаем данные для сохранения
         tokens_dict = {
-            "token": credentials.token,
-            "refresh_token": credentials.refresh_token,
-            "token_uri": credentials.token_uri or "https://oauth2.googleapis.com/token",
-            "client_id": credentials.client_id or client_id,
-            "client_secret": client_secret,  # Берем из env, а не из credentials!
-            "scopes": credentials.scopes
+            "token": token_data.get("access_token"),
+            "refresh_token": refresh_token,
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "scopes": SCOPES
         }
-        print(f"[Calendar Service] Токены успешно получены, refresh_token={'есть' if tokens_dict.get('refresh_token') else 'отсутствует'}, client_secret={'есть' if tokens_dict.get('client_secret') else 'отсутствует'}")
+        
+        logger.info(f"✅ Токены успешно получены, refresh_token={'есть' if tokens_dict.get('refresh_token') else 'отсутствует'}")
         return tokens_dict
+        
+    except requests.RequestException as e:
+        logger.error(f"🚨 Request exception при обмене кода на токены: {type(e).__name__}: {e}")
+        logger.error(f"redirect_uri used: {effective_redirect_uri}")
+        return None
     except Exception as e:
-        # Расширенный лог для упрощения отладки
-        print("[Calendar Service] Ошибка при обмене кода на токены")
-        print(f"[Calendar Service] redirect_uri used: {effective_redirect_uri}")
-        print(f"[Calendar Service] Exception type: {type(e).__name__}")
-        print(f"[Calendar Service] Exception details: {e}")
+        logger.error(f"🚨 Ошибка при обмене кода на токены: {type(e).__name__}: {e}")
+        logger.error(f"redirect_uri used: {effective_redirect_uri}")
+        import traceback
+        traceback.print_exc()
         return None
 
 
