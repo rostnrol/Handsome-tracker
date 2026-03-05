@@ -111,6 +111,7 @@ def _parse_duration_to_minutes(text: str) -> int:
     - "1h", "1 h", "1 hour", "2.5h"
     - "1:30" (hours:minutes)
     """
+    MAX_DURATION_MINUTES = 1440  # 24 hours max
     s = text.strip().lower()
     if not s:
         raise ValueError("Empty duration")
@@ -125,8 +126,10 @@ def _parse_duration_to_minutes(text: str) -> int:
                 hours = float(parts[0].strip())
                 minutes = float(parts[1].strip())
                 total = int(hours * 60 + minutes)
-                if total > 0:
+                if 0 < total <= MAX_DURATION_MINUTES:
                     return total
+                elif total > MAX_DURATION_MINUTES:
+                    raise ValueError(f"Duration cannot exceed {MAX_DURATION_MINUTES} minutes (24 hours)")
             except ValueError:
                 pass
 
@@ -135,23 +138,72 @@ def _parse_duration_to_minutes(text: str) -> int:
     if hour_match:
         hours = float(hour_match.group(1))
         total = int(hours * 60)
-        if total > 0:
+        if 0 < total <= MAX_DURATION_MINUTES:
             return total
+        elif total > MAX_DURATION_MINUTES:
+            raise ValueError(f"Duration cannot exceed {MAX_DURATION_MINUTES} minutes (24 hours)")
 
     # Minute formats, e.g., "30m", "45 min"
     minute_match = re.search(r"(\d+)\s*(m|min|mins|minute|minutes)\b", s)
     if minute_match:
         minutes = int(minute_match.group(1))
-        if minutes > 0:
+        if 0 < minutes <= MAX_DURATION_MINUTES:
             return minutes
+        elif minutes > MAX_DURATION_MINUTES:
+            raise ValueError(f"Duration cannot exceed {MAX_DURATION_MINUTES} minutes (24 hours)")
 
     # Plain number — interpret as minutes
     if s.isdigit():
         minutes = int(s)
-        if minutes > 0:
+        if 0 < minutes <= MAX_DURATION_MINUTES:
             return minutes
+        elif minutes > MAX_DURATION_MINUTES:
+            raise ValueError(f"Duration cannot exceed {MAX_DURATION_MINUTES} minutes (24 hours)")
+        else:
+            raise ValueError("Duration must be greater than 0")
 
     raise ValueError(f"Cannot parse duration from '{text}'")
+
+
+def _clear_reschedule_state(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Clear all reschedule-related state variables"""
+    for key in ['waiting_for', 'rescheduling_event_id', 'reschedule_conflict_start']:
+        context.user_data.pop(key, None)
+
+
+def _clear_event_preview_state(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Clear all event preview state variables"""
+    for key in ['pending_event_preview', 'pending_event_source', 'pending_event_data', 'waiting_for']:
+        context.user_data.pop(key, None)
+
+
+def _clear_schedule_import_state(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Clear all schedule import state variables"""
+    for key in ['state', 'pending_schedule', 'waiting_for', 'pending_schedule_preview', 'pending_event_source']:
+        context.user_data.pop(key, None)
+
+
+def _validate_user_input(text: str, field_name: str, max_length: int = 255) -> str:
+    """
+    Validate and normalize user input.
+    
+    Args:
+        text: User input text
+        field_name: Name of field (for error messages)
+        max_length: Maximum allowed length
+    
+    Returns:
+        Validated and trimmed text
+    
+    Raises:
+        ValueError: If validation fails
+    """
+    text = text.strip()
+    if not text:
+        raise ValueError(f"{field_name} cannot be empty")
+    if len(text) > max_length:
+        raise ValueError(f"{field_name} must be under {max_length} characters (got {len(text)})")
+    return text
 
 
 async def _get_credentials_or_notify(chat_id: int, stored_tokens: dict, reply_fn) -> Optional[object]:
@@ -216,6 +268,8 @@ def build_utc_list_keyboard() -> ReplyKeyboardMarkup:
 
 def init_db():
     con = sqlite3.connect(DB_PATH)
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA synchronous=NORMAL")
     cur = con.cursor()
     cur.execute(
         """
@@ -444,8 +498,14 @@ def tz_from_location(lat: float, lon: float) -> Optional[str]:
 
 def parse_utc_offset(text: str) -> Optional[str]:
     """Парсит UTC offset из текста (например, "UTC-5" -> таймзона)"""
+    if not isinstance(text, str):
+        return None
+
     text = text.strip().upper()
     if not text.startswith("UTC"):
+        return None
+
+    if len(text) > 10:  # Max reasonable length for "UTC-12 Back"
         return None
 
     # Маппинг UTC offset к таймзонам
@@ -476,16 +536,19 @@ def parse_utc_offset(text: str) -> Optional[str]:
         "UTC+11": "Pacific/Norfolk",
         "UTC+12": "Pacific/Auckland",
     }
-    
-    # Извлекаем UTC offset
-    if "UTC" in text:
-        parts = text.split()
-        if len(parts) > 0:
-            offset_str = parts[0]
-            if offset_str in tz_map:
-                return tz_map[offset_str]
-    
-        return None
+
+    # Direct lookup for exact matches
+    if text in tz_map:
+        return tz_map[text]
+
+    # Fallback: try to extract offset from longer text
+    parts = text.split()
+    if len(parts) > 0:
+        offset_str = parts[0]
+        if offset_str in tz_map:
+            return tz_map[offset_str]
+
+    return None
 
 
 # ----------------- Bot Handlers -----------------
@@ -682,6 +745,34 @@ async def finish_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.chat_data.pop('onboard_stage', None)
 
 
+# ---- Button Helper Functions ----
+
+def build_event_preview_buttons() -> InlineKeyboardMarkup:
+    """Build standard event preview buttons"""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Looks Good", callback_data="event_confirm"),
+        InlineKeyboardButton("✏️ Edit", callback_data="event_edit")
+    ]])
+
+
+def build_schedule_buttons() -> InlineKeyboardMarkup:
+    """Build standard schedule import buttons"""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Import Schedule", callback_data="schedule_confirm"),
+        InlineKeyboardButton("❌ Cancel", callback_data="schedule_cancel")
+    ]])
+
+
+def build_edit_menu_buttons() -> InlineKeyboardMarkup:
+    """Build edit menu buttons"""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ Title", callback_data="edit_title")],
+        [InlineKeyboardButton("📍 Location", callback_data="edit_location")],
+        [InlineKeyboardButton("🕐 Time", callback_data="edit_time")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="cancel_edit")]
+    ])
+
+
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик текстовых сообщений"""
     if not update.message or not update.message.text:
@@ -774,12 +865,17 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif waiting_for == 'name':
         # Проверяем, не является ли текст кнопкой из меню
         if text.strip() and text not in ["📋 Tasks for Today", "📆 Tasks for a Date", "📅 Open Google Calendar", "⚙️ Settings"]:
-            set_user_name(chat_id, text.strip())
-            await update.message.reply_text(
-                f"✅ Name updated to: {text.strip()}",
-                reply_markup=build_main_menu()
-            )
-            context.user_data.pop('waiting_for', None)
+            try:
+                validated_name = _validate_user_input(text, "Name", max_length=100)
+                set_user_name(chat_id, validated_name)
+                await update.message.reply_text(
+                    f"✅ Name updated to: {validated_name}",
+                    reply_markup=build_main_menu()
+                )
+                context.user_data.pop('waiting_for', None)
+            except ValueError as e:
+                await update.message.reply_text(f"❌ {str(e)}")
+                return
         else:
             await update.message.reply_text("Please enter a valid name (not a menu button):")
         return
@@ -1304,6 +1400,93 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             context.user_data.pop('pending_event_source', None)
         return
     
+    # Обработка редактирования события при подтверждении
+    elif waiting_for == 'edit_event_title':
+        pending_event = context.user_data.get('pending_event_preview')
+        if pending_event:
+            try:
+                validated_title = _validate_user_input(text, "Title", max_length=255)
+                pending_event['summary'] = validated_title
+                # Показываем обновленный предпросмотр
+                preview_text = format_event_preview(pending_event)
+                await update.message.reply_text(
+                    preview_text,
+                    parse_mode='HTML',
+                    reply_markup=build_event_preview_buttons()
+                )
+                context.user_data['waiting_for'] = 'event_confirmation'
+            except ValueError as e:
+                await update.message.reply_text(f"❌ {str(e)}")
+        return
+    
+    elif waiting_for == 'edit_event_location':
+        pending_event = context.user_data.get('pending_event_preview')
+        if pending_event:
+            try:
+                validated_location = _validate_user_input(text, "Location", max_length=255)
+                pending_event['location'] = validated_location
+                # Показываем обновленный предпросмотр
+                preview_text = format_event_preview(pending_event)
+                await update.message.reply_text(
+                    preview_text,
+                    parse_mode='HTML',
+                    reply_markup=build_event_preview_buttons()
+                )
+                context.user_data['waiting_for'] = 'event_confirmation'
+            except ValueError as e:
+                await update.message.reply_text(f"❌ {str(e)}")
+        return
+    
+    elif waiting_for == 'edit_event_time':
+        pending_event = context.user_data.get('pending_event_preview')
+        if pending_event:
+            try:
+                # Пытаемся распарсить новое время
+                user_tz = get_user_timezone(chat_id) or DEFAULT_TZ
+                tz = pytz.timezone(user_tz)
+                now_local = datetime.now(tz)
+                
+                # Простой парсер для времени
+                import re
+                
+                # Пытаемся распарсить разные форматы времени
+                time_match = re.search(r'(\d{1,2}):(\d{2})', text)
+                if time_match:
+                    new_hour = int(time_match.group(1))
+                    new_min = int(time_match.group(2))
+                    
+                    # Получаем существующую дату из pending_event
+                    start_dt = datetime.fromisoformat(pending_event['start_time'].replace('Z', '+00:00'))
+                    # Обновляем время
+                    new_start = start_dt.replace(hour=new_hour, minute=new_min)
+                    
+                    # Вычисляем end_time (сохраняя длительность)
+                    end_dt = datetime.fromisoformat(pending_event.get('end_time', '').replace('Z', '+00:00'))
+                    duration = end_dt - start_dt if 'end_time' in pending_event else timedelta(hours=1)
+                    new_end = new_start + duration
+                    
+                    pending_event['start_time'] = new_start.isoformat()
+                    pending_event['end_time'] = new_end.isoformat()
+                    
+                    # Показываем обновленный предпросмотр
+                    preview_text = format_event_preview(pending_event)
+                    await update.message.reply_text(
+                        preview_text,
+                        parse_mode='HTML',
+                        reply_markup=build_event_preview_buttons()
+                    )
+                    context.user_data['waiting_for'] = 'event_confirmation'
+                else:
+                    await update.message.reply_text(
+                        "❌ Couldn't parse the time. Please use HH:MM format (e.g., '14:30'):"
+                    )
+            except Exception as e:
+                print(f"[Bot] Ошибка при редактировании времени события: {e}")
+                await update.message.reply_text(
+                    "❌ An error occurred. Please try again or send the time in HH:MM format:"
+                )
+        return
+    
     # Обработка онбординга
     if context.chat_data.get('onboard_stage') == 'ask_name':
         # Вопрос об имени
@@ -1535,8 +1718,131 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         # Удаляем временный файл
         try:
             os.unlink(tmp_path)
-        except:
-            pass
+        except FileNotFoundError:
+            pass  # File already deleted - OK
+        except OSError as e:
+            print(f"[Bot] Warning: Failed to delete temp file {tmp_path}: {e}")
+
+
+def format_event_preview(event_data: Dict[str, str]) -> str:
+    """
+    Форматирует данные события для предпросмотра.
+    
+    Args:
+        event_data: Данные события (summary, start_time, end_time, location, description)
+    
+    Returns:
+        Форматированная строка для показа пользователю
+    """
+    summary = event_data.get("summary", "Event")
+    location = event_data.get("location", "").strip()
+    description = event_data.get("description", "").strip()
+    
+    try:
+        # Парсим ISO время
+        start_dt = datetime.fromisoformat(event_data["start_time"].replace("Z", "+00:00"))
+        end_dt = datetime.fromisoformat(event_data["end_time"].replace("Z", "+00:00"))
+        
+        # Форматируем время
+        start_str = start_dt.strftime("%a %d %b %H:%M")
+        end_str = end_dt.strftime("%H:%M")
+    except:
+        start_str = event_data.get("start_time", "")
+        end_str = event_data.get("end_time", "")
+    
+    preview = f"📋 <b>{summary}</b>\n"
+    preview += f"🕐 {start_str} - {end_str}\n"
+    
+    if location:
+        preview += f"📍 {location}\n"
+    
+    if description:
+        preview += f"\n📝 {description}"
+    
+    return preview
+
+
+def format_schedule_preview(events: List[Dict[str, str]]) -> str:
+    """
+    Форматирует рассписание для предпросмотра.
+    
+    Args:
+        events: Список событий из расписания
+    
+    Returns:
+        Форматированная строка со сводкой расписания
+    """
+    if not events:
+        return "No events found"
+    
+    subject = events[0].get("summary", "Class")
+    location = events[0].get("location", "").strip()
+    
+    preview = f"📋 <b>{subject}</b>\n"
+    if location:
+        preview += f"📍 {location}\n"
+    
+    preview += f"\n📅 Weekly Schedule ({len(events)} classes):\n"
+    
+    for event in events[:5]:  # Показываем первые 5 событий
+        day = event.get("day_of_week", "Unknown")
+        start = event.get("start_time", "")
+        end = event.get("end_time", "")
+        preview += f"  • {day}: {start} - {end}\n"
+    
+    if len(events) > 5:
+        preview += f"  ... and {len(events) - 5} more\n"
+    
+    return preview
+
+
+async def show_event_preview(update: Update, context: ContextTypes.DEFAULT_TYPE, event_data: Dict[str, str], source: str):
+    """
+    Показывает предпросмотр события с кнопками подтверждения.
+    
+    Args:
+        update: Telegram Update
+        context: Context
+        event_data: Данные события
+        source: Источник (text/photo/voice)
+    """
+    preview_text = format_event_preview(event_data)
+    
+    # Сохраняем данные события для дальнейшей обработки
+    context.user_data['pending_event_preview'] = event_data
+    context.user_data['pending_event_source'] = source
+    context.user_data['waiting_for'] = 'event_confirmation'
+    
+    await update.message.reply_text(
+        preview_text,
+        parse_mode='HTML',
+        reply_markup=build_event_preview_buttons()
+    )
+
+
+async def show_schedule_preview(update: Update, context: ContextTypes.DEFAULT_TYPE, schedule_data: Dict, source: str):
+    """
+    Показывает предпросмотр расписания с кнопками подтверждения.
+    
+    Args:
+        update: Telegram Update
+        context: Context
+        schedule_data: Данные расписания
+        source: Источник (text/photo/voice)
+    """
+    events = schedule_data.get("events", [])
+    preview_text = format_schedule_preview(events)
+    
+    # Сохраняем данные расписания для дальнейшей обработки
+    context.user_data['pending_schedule_preview'] = schedule_data
+    context.user_data['pending_event_source'] = source
+    context.user_data['waiting_for'] = 'schedule_confirmation'
+    
+    await update.message.reply_text(
+        preview_text,
+        parse_mode='HTML',
+        reply_markup=build_schedule_buttons()
+    )
 
 
 async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1579,16 +1885,19 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
         # Проверяем, является ли это рекуррентным расписанием
         if event_data.get("is_recurring_schedule", False):
-            await handle_schedule_import(update, context, event_data, source="photo")
+            # Показываем предпросмотр расписания
+            await show_schedule_preview(update, context, event_data, source="photo")
         else:
-            # Создаем событие в календаре
-            await create_calendar_event(update, context, event_data, source="photo")
+            # Показываем предпросмотр события
+            await show_event_preview(update, context, event_data, source="photo")
     finally:
         # Удаляем временный файл
         try:
             os.unlink(tmp_path)
-        except:
-            pass
+        except FileNotFoundError:
+            pass  # File already deleted - OK
+        except OSError as e:
+            print(f"[Bot] Warning: Failed to delete temp file {tmp_path}: {e}")
 
 
 def get_next_occurrence_of_weekday(start_date: datetime, target_weekday: str) -> datetime:
@@ -2121,7 +2430,12 @@ async def process_task(update: Update, context: ContextTypes.DEFAULT_TYPE, text:
 
         # Проверяем, является ли это рекуррентным расписанием
         if ai_parsed.get("is_recurring_schedule", False):
-            await handle_schedule_import(update, context, ai_parsed, source=source)
+            # Для голоса и фото показываем предпросмотр расписания
+            if source in ("voice", "photo"):
+                await show_schedule_preview(update, context, ai_parsed, source=source)
+            else:
+                # Для текста сразу импортируем
+                await handle_schedule_import(update, context, ai_parsed, source=source)
             return
         
         # Проверяем, является ли это задачей
@@ -2161,13 +2475,17 @@ async def process_task(update: Update, context: ContextTypes.DEFAULT_TYPE, text:
 
             await update.message.reply_text(
                 "⏱ Please specify how long this task will take.\n\n"
-                "Examples: <b>30</b>, <b>30 min</b>, <b>1h</b>, <b>1:30</b>, <b>45 минут</b>",
+                "Examples: <b>30</b>, <b>30 min</b>, <b>1h</b>, <b>1:30</b>",
                 parse_mode='HTML'
             )
             return
         
-        # Иначе сразу создаём событие в календаре
-        await create_calendar_event(update, context, ai_parsed, source=source)
+        # Для голоса и фото показываем предпросмотр события
+        if source in ("voice", "photo"):
+            await show_event_preview(update, context, ai_parsed, source=source)
+        else:
+            # Для текста сразу создаём событие в календаре
+            await create_calendar_event(update, context, ai_parsed, source=source)
         
     except Exception as e:
         print(f"[Bot] Ошибка при обработке задачи: {e}")
@@ -2542,6 +2860,127 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             "🔌 Google Calendar has been disconnected.\n\n"
             "You can connect a new account at any time from Settings or by typing /start.",
         )
+        return
+
+    # Обработка подтверждения события из предпросмотра
+    elif callback_data == "event_confirm":
+        await query.answer("")  # тихий ответ
+        chat_id = query.message.chat_id
+        
+        # Получаем сохраненные данные события
+        event_data = context.user_data.get('pending_event_preview')
+        source = context.user_data.get('pending_event_source', 'unknown')
+        
+        if not event_data:
+            await query.edit_message_text("❌ Event data not found. Please try again.")
+            return
+        
+        # Очищаем состояние
+        context.user_data.pop('pending_event_preview', None)
+        context.user_data.pop('pending_event_source', None)
+        context.user_data.pop('waiting_for', None)
+        
+        # Создаем событие в календаре
+        # Нужно создать временный Update object для create_calendar_event
+        await create_calendar_event(update, context, event_data, source=source)
+        track_event(chat_id, "event_preview_confirmed", {"source": source})
+        return
+
+    elif callback_data == "event_edit":
+        await query.answer("")  # тихий ответ
+        chat_id = query.message.chat_id
+        
+        # Показываем меню редактирования
+        edit_keyboard = [
+            [InlineKeyboardButton("✏️ Edit Title", callback_data="edit_title")],
+            [InlineKeyboardButton("📍 Edit Location", callback_data="edit_location")],
+            [InlineKeyboardButton("🕐 Edit Time", callback_data="edit_time")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="cancel_edit")]
+        ]
+        
+        await query.edit_message_text(
+            "What would you like to edit?",
+            reply_markup=InlineKeyboardMarkup(edit_keyboard)
+        )
+        context.user_data['waiting_for'] = 'event_edit_choice'
+        return
+
+    # Обработка подтверждения расписания из предпросмотра
+    elif callback_data == "schedule_confirm":
+        await query.answer("")  # тихий ответ
+        
+        # Получаем сохраненные данные расписания
+        schedule_data = context.user_data.get('pending_schedule_preview')
+        source = context.user_data.get('pending_event_source', 'unknown')
+        
+        if not schedule_data:
+            await query.edit_message_text("❌ Schedule data not found. Please try again.")
+            return
+        
+        # Очищаем временные данные предпросмотра
+        context.user_data.pop('pending_schedule_preview', None)
+        context.user_data.pop('pending_event_source', None)
+        context.user_data.pop('waiting_for', None)
+        
+        # Вызываем обработку импорта расписания (которая спросит о количестве недель)
+        await handle_schedule_import(update, context, schedule_data, source=source)
+        track_event(chat_id, "schedule_preview_confirmed", {"source": source})
+        return
+
+    elif callback_data == "schedule_cancel":
+        await query.answer("")  # тихий ответ
+        
+        # Очищаем сохраненные данные
+        context.user_data.pop('pending_schedule_preview', None)
+        context.user_data.pop('pending_event_source', None)
+        context.user_data.pop('waiting_for', None)
+        
+        await query.edit_message_text(
+            "❌ Schedule import cancelled.",
+            reply_markup=build_main_menu()
+        )
+        return
+
+    # Обработка редактирования события
+    elif callback_data == "edit_title":
+        await query.answer("")  # тихий ответ
+        await query.message.reply_text(
+            "📋 Enter new event title:"
+        )
+        context.user_data['waiting_for'] = 'edit_event_title'
+        return
+
+    elif callback_data == "edit_location":
+        await query.answer("")  # тихий ответ
+        await query.message.reply_text(
+            "📍 Enter new location:"
+        )
+        context.user_data['waiting_for'] = 'edit_event_location'
+        return
+
+    elif callback_data == "edit_time":
+        await query.answer("")  # тихий ответ
+        await query.message.reply_text(
+            "🕐 Enter new time (e.g., 'tomorrow at 3pm' or '2026-02-16 14:00'):"
+        )
+        context.user_data['waiting_for'] = 'edit_event_time'
+        return
+
+    elif callback_data == "cancel_edit":
+        await query.answer("")  # тихий ответ
+        
+        # Показываем предпросмотр еще раз
+        event_data = context.user_data.get('pending_event_preview')
+        if event_data:
+            preview_text = format_event_preview(event_data)
+            await query.edit_message_text(
+                preview_text,
+                parse_mode='HTML',
+                reply_markup=build_event_preview_buttons()
+            )
+            context.user_data['waiting_for'] = 'event_confirmation'
+        else:
+            await query.edit_message_text("Event data not found.")
         return
 
     # Для остальных callback нужна авторизация Google Calendar

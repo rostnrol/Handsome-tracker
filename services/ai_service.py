@@ -88,9 +88,17 @@ async def extract_events_from_image(image_path: str, user_timezone: str = "UTC")
             image_data = base64.b64encode(image_file.read()).decode('utf-8')
         
         # Определяем формат изображения
-        if image_path.lower().endswith('.png'):
+        path_lower = image_path.lower()
+        if path_lower.endswith('.png'):
             image_format = "image/png"
+        elif path_lower.endswith('.gif'):
+            image_format = "image/gif"
+        elif path_lower.endswith('.webp'):
+            image_format = "image/webp"
+        elif path_lower.endswith(('.jpg', '.jpeg')):
+            image_format = "image/jpeg"
         else:
+            # По умолчанию предполагаем JPEG для неизвестных расширений
             image_format = "image/jpeg"
         
         response = await client.chat.completions.create(
@@ -117,10 +125,10 @@ For SINGLE EVENT, return:
 {
     "is_recurring_schedule": false,
     "summary": "event title",
-    "start_time": "ISO 8601 format",
-    "end_time": "ISO 8601 format",
+    "start_time": "ISO 8601 format with timezone (e.g., 2026-02-16T10:30:00+00:00)",
+    "end_time": "ISO 8601 format with timezone (e.g., 2026-02-16T11:30:00+00:00)",
     "description": "optional description",
-    "location": "optional location"
+    "location": "optional location - include all components (room, building, etc.) if present"
 }
 
 For RECURRING WEEKLY SCHEDULE (timetable with days of week), return:
@@ -132,7 +140,7 @@ For RECURRING WEEKLY SCHEDULE (timetable with days of week), return:
             "start_time": "12:15",       // HH:MM 24h format (local time)
             "end_time": "13:45",         // HH:MM 24h format (local time)
             "summary": "Class/Event name",
-            "location": "optional location"
+            "location": "Aula 4A, San Giobbe"  // IMPORTANT: Include ALL location components (room, building, etc.) combined in one field
         },
         ...
     ]
@@ -143,14 +151,15 @@ CRITICAL RULES:
 - Always normalize day names to English (e.g., "Lunedì" -> "Monday", "Martedì" -> "Tuesday")
 - Extract time in 24h format (e.g., "Ore 10:30" -> "10:30")
 - If you see a specific date (e.g., "16 febbraio"), use it for single events
-- For recurring schedules, ignore specific dates and use only day of week"""
+- For recurring schedules, ignore specific dates and use only day of week
+- **CRITICAL for location**: When extracting location from schedule entries, include ALL location components (room number, building name, campus) in one field, separated by ", " if needed. Example: "Aula 4A, San Giobbe" not just "San Giobbe"""
                 },
                 {
                     "role": "user",
                     "content": [
                         {
                             "type": "text",
-                            "text": f"Extract events from this image. Current timezone: {user_timezone}. If this is a weekly schedule/timetable, return is_recurring_schedule: true with events array. Otherwise return single event format."
+                            "text": f"Extract events from this image. User timezone: {user_timezone}. For single events, format times as ISO 8601 with timezone offset (e.g., 2026-02-16T14:30:00+01:00). For schedules/timetables, extract as day+time in HH:MM format. If unsure about timezone, use UTC (Z) or the provided timezone."
                         },
                         {
                             "type": "image_url",
@@ -271,8 +280,13 @@ CRITICAL RULES:
     except APIError as e:
         print(f"[AI Service] Ошибка API OpenAI при обработке изображения: {e}")
         return None
+    except json.JSONDecodeError as e:
+        print(f"[AI Service] Ошибка парсинга JSON при обработке изображения: {e}")
+        print(f"[AI Service] Полученный контент: {content[:300] if 'content' in locals() else 'N/A'}")
+        return None
     except Exception as e:
-        print(f"[AI Service] Ошибка при обработке изображения: {e}")
+        print(f"[AI Service] Ошибка при обработке изображения: {type(e).__name__}: {e}")
+        return None
         return None
 
 
@@ -334,7 +348,7 @@ JSON structure for RECURRING WEEKLY SCHEDULE:
             "start_time": "12:15",       // HH:MM 24h format (local time, not ISO)
             "end_time": "13:45",         // HH:MM 24h format (local time, not ISO)
             "summary": "Class name or event title",
-            "location": "San Giobbe"     // Optional, can be empty string
+            "location": "Aula 4A, San Giobbe"     // IMPORTANT: Include ALL location info (room number, building name, etc.) combined in single field. Separate parts with comma+space if needed. Can be empty string.
         },
         ...
     ]
@@ -347,6 +361,7 @@ CRITICAL RULES:
    - Input: "Math - Advanced\nMonday 10:00 - 11:30, Wednesday 14:00 - 15:30" → all events get "summary": "Math - Advanced"
    - Input: "Chemistry Lab\nLunedì 09:00 - 10:30, Mercoledì 09:00 - 10:30" → all events get "summary": "Chemistry Lab"
    **IMPORTANT**: Always extract and use the first non-schedule line(s) as the subject name for recurring schedules. This is the most common format for class timetables.
+1b. **CRITICAL for location extraction**: When extracting location for each event, include ALL location components found (room/classroom number, building name, campus name, etc.). If text shows "Aula 4A San Giobbe", the location field must be "Aula 4A, San Giobbe" (combining room and building). Combine multiple location parts with ", " (comma+space). Never extract only the last location component - include everything.
 2. For SINGLE TASKS: If the message does NOT look like a task (e.g., "Hello", "How are you", "Thanks", greetings, casual conversation, random words, questions without action, random characters like "000000", meaningless text), set "is_task": false and return minimal valid JSON.
 3. If "is_task": false, you can set summary to empty string, but still provide valid ISO times (use tomorrow 09:00 as default).
 4. If user did NOT specify time explicitly (e.g., "Buy milk", "Call John"), set the task to TOMORROW at 09:00 (default morning slot).
