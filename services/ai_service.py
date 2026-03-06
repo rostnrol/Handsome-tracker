@@ -381,11 +381,18 @@ CRITICAL RULES:
    **IMPORTANT**: Always extract and use the first non-schedule line(s) as the subject name for recurring schedules. This is the most common format for class timetables.
 1b. **CRITICAL for location extraction**: When extracting location for each event, include ALL location components found (room/classroom number, building name, campus name, etc.). If text shows "Aula 4A San Giobbe", the location field must be "Aula 4A, San Giobbe" (combining room and building). Combine multiple location parts with ", " (comma+space). Never extract only the last location component - include everything.
 2. For SINGLE TASKS: If the message does NOT look like a task (e.g., "Hello", "How are you", "Thanks", greetings, casual conversation, random words, questions without action, random characters like "000000", meaningless text), set "is_task": false and return minimal valid JSON.
-3. If "is_task": false, you can set summary to empty string, but still provide valid ISO times (use tomorrow 09:00 as default).
-4. If user did NOT specify time explicitly (e.g., "Buy milk", "Call John"), set the task to TOMORROW at 09:00 (default morning slot).
+3. If "is_task": false, you can set summary to empty string, but still provide valid ISO times (use today 09:00 as default).
+4. If user did NOT specify time explicitly (e.g., "Buy milk", "Call John"), set the task to TODAY at 09:00 (morning slot). Do NOT use tomorrow unless the user explicitly says "tomorrow", "next week", or similar future words.
 5. If user specified only date without time, use 09:00 as start time and 09:30 as end time.
-6. If user specified only time without date (e.g., "Meeting at 15:00"), use TODAY if that time has NOT passed yet, otherwise use TOMORROW.
-7. If time is in the past, move to tomorrow.
+6. **TIME WITHOUT DATE**: If user specified only a time (e.g., "Meeting at 15:00", "call at 21:30"), ALWAYS use TODAY at that local time. Only use TOMORROW if that exact time has ALREADY PASSED today (e.g., if current time is 22:00 and user says "21:30", then use tomorrow since 21:30 already passed).
+6a. **DAY OF WEEK**: If user specified a day of week (e.g., "Wednesday 14:00", "wed 10:30", "friday 9am", "poop wed 10:30"), find the NEXT upcoming occurrence of that day:
+    - If today is NOT that weekday → use the nearest upcoming day of that name this week or next
+    - If today IS that weekday AND the time has NOT yet passed → use today
+    - If today IS that weekday AND the time HAS already passed → use NEXT week's same weekday (7 days ahead)
+    Example: today is Friday, user says "wed 10:30" → schedule for next Wednesday
+    Example: today is Wednesday 09:00, user says "wed 10:30" → schedule for today (Wednesday) at 10:30
+    Example: today is Wednesday 11:00, user says "wed 10:30" → 10:30 already passed → schedule for NEXT Wednesday
+7. Only schedule for tomorrow/future if the computed time would be in the past relative to NOW.
 8. For single tasks: All times must be in the USER'S LOCAL TIMEZONE with the correct numeric UTC offset (e.g., "2026-03-10T14:00:00+03:00"). DO NOT convert times to pure UTC yourself; keep the local offset.
 9. Default duration is 30 minutes (end_time = start_time + 30 minutes) ONLY when the user did NOT explicitly specify duration. In that case set "duration_was_inferred": true. If the user clearly specifies duration (e.g., "for 2 hours", "1.5h", "for 45 minutes"), compute end_time accordingly and set "duration_was_inferred": false.
 10. Always set "duration_minutes" = total duration in minutes (end_time - start_time), even if the user did not specify duration explicitly.
@@ -565,12 +572,39 @@ Return JSON with task information."""
             else:
                 end_dt = end_dt.astimezone(pytz.utc)
             
-            # Если время в прошлом, переносим на завтра
+            # Safety correction: if AI returned a future time that is actually in the past, move to tomorrow.
+            # Also correct the reverse: if AI returned tomorrow but the same time today is still in the future
+            # AND the user didn't explicitly mention "tomorrow", use today instead.
             now_utc = datetime.now(pytz.utc)
             if start_dt < now_utc:
-                # Переносим на завтра
+                # Time is in the past — move to tomorrow
                 start_dt = start_dt + timedelta(days=1)
                 end_dt = end_dt + timedelta(days=1)
+            else:
+                # Time is in the future — check if AI unnecessarily pushed it to tomorrow
+                # when the same clock time today hasn't passed yet.
+                tz_obj = pytz.timezone(user_timezone)
+                now_local = datetime.now(tz_obj)
+                start_local = start_dt.astimezone(tz_obj)
+                tomorrow_local = now_local.date() + timedelta(days=1)
+                if start_local.date() == tomorrow_local:
+                    # AI chose tomorrow — check if same time today would still be in the future
+                    today_candidate = tz_obj.localize(
+                        datetime(now_local.year, now_local.month, now_local.day,
+                                 start_local.hour, start_local.minute, start_local.second)
+                    )
+                    if today_candidate > now_local:
+                        # Today's time hasn't passed — check that user didn't explicitly say "tomorrow"
+                        tomorrow_keywords = [
+                            "tomorrow", "завтра", "next day", "следующий день",
+                        ]
+                        user_text_lower = text.lower()
+                        user_said_tomorrow = any(kw in user_text_lower for kw in tomorrow_keywords)
+                        if not user_said_tomorrow:
+                            # Correct: use today instead of tomorrow
+                            duration = end_dt - start_dt
+                            start_dt = today_candidate.astimezone(pytz.utc)
+                            end_dt = start_dt + duration
             
             # Убеждаемся, что end_time >= start_time
             if end_dt < start_dt:

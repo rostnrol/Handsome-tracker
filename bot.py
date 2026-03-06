@@ -347,7 +347,7 @@ def init_db():
 
 
 def get_con():
-    return sqlite3.connect(DB_PATH)
+    return sqlite3.connect(DB_PATH, timeout=10.0)
 
 
 # ----------------- Helpers -----------------
@@ -631,19 +631,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Шаг 1: Приветственное сообщение
     await update.message.reply_text(
         "Hi!👋🏻\n\n"
-        "I am a task tracker you've been dreaming of\n"
-        "With me you won't forget a thing\n\n"
-        "Every morning, I'll send you a briefing of your day\n\n"
-        "You can send me tasks in any format:\n"
-        "• Voice messages\n"
+        "I am a task tracker you've been dreaming of.\n"
+        "With me you <b>won't forget a thing.</b>\n\n"
+        "Every morning, I'll send you a <u>briefing of your day.</u>\n\n"
+        "You can send me tasks in <b>any format:</b>\n"
         "• Text\n"
-        "• or even Photos of notes/schedules\n\n"
-        "I will instantly add them to your Google Calendar\n"
-        "During the day you can see your tasks in a little app here and mark the completed ones\n\n"
-        "Every evening, I'll send you a brief summary of your day, and we'll reflect on\n"
+        "• Voice messages\n"
+        "• Or even Photos of notes/schedules.\n\n"
+        "You can add one or several events at a time.\n\n"
+        "You can even add a schedule of your regular meetings or classes.\n\n"
+        "I will instantly add them to your <u>Google Calendar.</u>\n"
+        "During the day you can <u>see</u> your tasks in a little app here and <u>mark</u> the completed ones, <u>reschedule</u>, or\n"
+        "<u>cancel</u> those that are no longer relevant.\n\n"
+        "Every evening, I'll send you a <u>brief summary of your day,</u> and we'll reflect on\n"
         "• what can be transferred to the next day\n"
-        "• and what can be forgotten\n\n"
-        "Let's set you up✨"
+        "• and what can be forgotten.\n\n"
+        "Let's set you up✨",
+        parse_mode='HTML'
     )
     
     # Шаг 2: Вопрос об имени
@@ -2247,13 +2251,13 @@ def get_next_occurrence_of_weekday(start_date: datetime, target_weekday: str) ->
     
     current_weekday = start_date.weekday()
     days_ahead = target_weekday_num - current_weekday
-    
-    # Если день недели уже прошел на этой неделе (но не сегодня), ищем на следующей неделе
-    # Если сегодня - используем сегодня
+
     if days_ahead < 0:
+        # Day already passed this week — jump to next week
         days_ahead += 7
-    # Если days_ahead == 0, это сегодня - используем start_date как есть
-    
+    # If days_ahead == 0, today is that weekday — use today as-is
+    # (caller is responsible for checking if the time has passed and adding 7 days if needed)
+
     return start_date + timedelta(days=days_ahead)
 
 
@@ -2954,10 +2958,10 @@ async def show_daily_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if not events:
             await update.message.reply_text(
-                "📅 **Here are your tasks for today:**\n\n"
+                "📅 <b>Here are your tasks for today:</b>\n\n"
                 "No tasks scheduled for today! 🎉",
                 reply_markup=build_main_menu(),
-                parse_mode='Markdown'
+                parse_mode='HTML'
             )
             return
 
@@ -2970,7 +2974,7 @@ async def show_daily_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         
         # Формируем текст сообщения - только интро
-        message_text = "📅 **Here are your tasks for today:**\n\n"
+        message_text = "📅 <b>Here are your tasks for today:</b>\n\n"
         
         # Добавляем информацию о выполненных задачах в текст
         if completed_events:
@@ -3024,13 +3028,13 @@ async def show_daily_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 keyboard.extend(_build_task_row(event_id, label_text))
         
         reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
-        
+
         await update.message.reply_text(
             message_text,
             reply_markup=reply_markup,
-            parse_mode='Markdown'
+            parse_mode='HTML'
         )
-        
+
     except Exception as e:
         print(f"[Bot] Ошибка при отображении задач на сегодня: {e}")
         await update.message.reply_text(
@@ -3126,9 +3130,9 @@ async def show_tasks_for_date(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         if not events:
             await update.message.reply_text(
-                f"📆 *{date_label}*\n\nNo tasks scheduled for this day! 🎉",
+                f"📆 <b>{date_label}</b>\n\nNo tasks scheduled for this day! 🎉",
                 reply_markup=build_main_menu(),
-                parse_mode='Markdown'
+                parse_mode='HTML'
             )
             return
 
@@ -3139,7 +3143,7 @@ async def show_tasks_for_date(update: Update, context: ContextTypes.DEFAULT_TYPE
             and not e.get('summary', '').startswith('❌ ')
         ]
 
-        message_text = f"📆 *{date_label}*\n\n"
+        message_text = f"📆 <b>{date_label}</b>\n\n"
 
         if completed_events:
             message_text += "✅ Completed:\n"
@@ -3191,7 +3195,7 @@ async def show_tasks_for_date(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(
             message_text,
             reply_markup=reply_markup,
-            parse_mode='Markdown'
+            parse_mode='HTML'
         )
 
     except Exception as e:
@@ -3595,10 +3599,10 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             
             if not events:
                 await query.edit_message_text(
-                    "📅 **Here are your tasks for today:**\n\n"
+                    "📅 <b>Here are your tasks for today:</b>\n\n"
                     "No tasks scheduled for today! 🎉",
                     reply_markup=None,
-                    parse_mode='Markdown'
+                    parse_mode='HTML'
                 )
                 await query.answer("✅ List updated!")
                 return
@@ -3612,7 +3616,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             ]
             
             # Формируем текст сообщения
-            message_text = "📅 **Here are your tasks for today:**\n\n"
+            message_text = "📅 <b>Here are your tasks for today:</b>\n\n"
             
             # Добавляем выполненные задачи
             if completed_events:
@@ -3669,7 +3673,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             await query.edit_message_text(
                 message_text,
                 reply_markup=reply_markup,
-                parse_mode='Markdown'
+                parse_mode='HTML'
             )
             await query.answer("✅ List updated!")
         except Exception as e:
@@ -3723,7 +3727,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                     if is_evening_recap:
                         new_message_text = "Hey, hope it was a productive day!\n\n"
                     else:
-                        new_message_text = "📅 **Here are your tasks for today:**\n\n"
+                        new_message_text = "📅 <b>Here are your tasks for today:</b>\n\n"
                     
                     # Добавляем выполненные задачи
                     if completed_events:
@@ -3781,7 +3785,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                     await query.edit_message_text(
                         new_message_text,
                         reply_markup=new_markup,
-                        parse_mode='Markdown' if "**" in new_message_text else None
+                        parse_mode='HTML' if "<b>" in new_message_text else None
                     )
                 else:
                     inline_keyboard = query.message.reply_markup.inline_keyboard if query.message.reply_markup else []
@@ -4192,12 +4196,13 @@ async def create_calendar_event(update: Update, context: ContextTypes.DEFAULT_TY
             print(f"[Bot] - client_id: {'есть' if stored_tokens.get('client_id') else 'нет'}")
             print(f"[Bot] - client_secret: {'есть' if stored_tokens.get('client_secret') else 'нет'}")
 
-        # Формируем redirect_uri для callback (используем тот же логику, что и в finish_onboarding)
-        base_url = os.getenv("BASE_URL")
-        if not base_url:
-            port = int(os.getenv("PORT", 8000))
-            base_url = f"http://localhost:{port}"
-        redirect_uri = f"{base_url}/google/callback"
+        redirect_uri = os.getenv("REDIRECT_URI")
+        if not redirect_uri:
+            base_url = os.getenv("BASE_URL")
+            if not base_url:
+                port = int(os.getenv("PORT", 8000))
+                base_url = f"http://localhost:{port}"
+            redirect_uri = f"{base_url}/google/callback"
 
         auth_url = get_authorization_url(chat_id, redirect_uri)
         print(f"[Bot] Отправляем ссылку на авторизацию Google Calendar для chat_id={chat_id}")
