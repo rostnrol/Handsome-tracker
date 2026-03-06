@@ -3,7 +3,7 @@ Scheduler Service для утренних и вечерних сводок че�
 Использует cron job, который запускается каждый час и проверяет всех пользователей
 """
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date as date_type
 from typing import List, Dict
 import pytz
 
@@ -14,6 +14,7 @@ from services.ai_service import generate_morning_briefing_intro
 from services.calendar_service import get_credentials_from_stored
 from services.db_service import get_google_tokens, get_user_timezone, get_morning_time, get_evening_time
 from googleapiclient.discovery import build
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 
 scheduler = AsyncIOScheduler()
@@ -91,15 +92,13 @@ def get_events_for_date(credentials, user_timezone: str, target_date) -> List[Di
         service = build('calendar', 'v3', credentials=credentials)
         tz = pytz.timezone(user_timezone)
 
-        from datetime import date as date_type
         if hasattr(target_date, 'date'):
             local_date = target_date.date()
         else:
             local_date = target_date
 
-        from datetime import datetime as dt_type
-        start_of_day = tz.localize(dt_type(local_date.year, local_date.month, local_date.day, 0, 0, 0))
-        end_of_day = tz.localize(dt_type(local_date.year, local_date.month, local_date.day, 23, 59, 59))
+        start_of_day = tz.localize(datetime(local_date.year, local_date.month, local_date.day, 0, 0, 0))
+        end_of_day = tz.localize(datetime(local_date.year, local_date.month, local_date.day, 23, 59, 59))
 
         start_utc = start_of_day.astimezone(pytz.utc).isoformat()
         end_utc = end_of_day.astimezone(pytz.utc).isoformat()
@@ -206,7 +205,7 @@ async def send_morning_briefing(bot, chat_id: int, user_timezone: str):
                         if dt.tzinfo:
                             dt = dt.astimezone(tz)
                             time_str = dt.strftime('%H:%M')
-                except:
+                except Exception:
                     pass
             
             if time_str:
@@ -236,7 +235,7 @@ async def send_morning_briefing(bot, chat_id: int, user_timezone: str):
                 chat_id=chat_id,
                 text="Good morning! 🌅 Have a great day!"
             )
-        except:
+        except Exception:
             pass
 
 
@@ -311,7 +310,7 @@ async def send_evening_recap(bot, chat_id: int, user_timezone: str):
                             if dt.tzinfo:
                                 dt = dt.astimezone(tz)
                                 time_str = dt.strftime('%H:%M')
-                    except:
+                    except Exception:
                         pass
                 
                 if time_str:
@@ -327,8 +326,6 @@ async def send_evening_recap(bot, chat_id: int, user_timezone: str):
             message_text += "🎉 No uncompleted tasks! Great job!"
         
         # Создаем inline-клавиатуру для невыполненных задач (одна строка на задачу)
-        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-        
         keyboard = []
         tz = pytz.timezone(user_timezone)
         for event in incomplete_events:
@@ -344,7 +341,7 @@ async def send_evening_recap(bot, chat_id: int, user_timezone: str):
                             if dt.tzinfo:
                                 dt = dt.astimezone(tz)
                                 time_str = dt.strftime('%H:%M')
-                    except:
+                    except Exception:
                         pass
                 
                 label_text = f"{time_str} {summary}" if time_str else summary
@@ -371,7 +368,7 @@ async def send_evening_recap(bot, chat_id: int, user_timezone: str):
                 chat_id=chat_id,
                 text="Good evening! 🌙 Have a restful night!"
             )
-        except:
+        except Exception:
             pass
 
 

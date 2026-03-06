@@ -522,11 +522,7 @@ def has_google_auth(user_id: int) -> bool:
     """Проверяет, авторизован ли пользователь в Google"""
     tokens = get_google_tokens(user_id)
     refresh_token = tokens.get("refresh_token") if tokens else None
-    has_auth = tokens is not None and refresh_token is not None and refresh_token != ""
-    print(f"[Bot] Проверка авторизации для user_id={user_id}: {'авторизован' if has_auth else 'не авторизован'}")
-    if tokens and not has_auth:
-        print(f"[Bot] Причина: tokens={'есть' if tokens else 'нет'}, refresh_token={'есть' if refresh_token else 'отсутствует'}")
-    return has_auth
+    return tokens is not None and refresh_token is not None and refresh_token != ""
 
 
 def tz_from_location(lat: float, lon: float) -> Optional[str]:
@@ -606,8 +602,7 @@ def parse_utc_offset(text: str) -> Optional[str]:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
     chat_id = update.effective_chat.id
-    init_db()
-    
+
     # Трекинг события
     track_event(chat_id, "user_start")
     
@@ -823,12 +818,12 @@ async def finish_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "To get started, connect your Google Calendar:\n\n"
         f'<a href="{auth_url}">🔗 Connect Google Calendar</a>\n\n'
         "Click the link above to authorize. You'll be redirected back automatically.",
-        parse_mode='HTML'
+        parse_mode='HTML',
+        reply_markup=ReplyKeyboardRemove()
     )
-    
-    # Очищаем стадию онбординга, так как авторизация теперь происходит автоматически через callback
-    # Пользователь может отправлять сообщения, и они будут обрабатываться как обычные задачи
-    context.chat_data.pop('onboard_stage', None)
+
+    # Очищаем стадию онбординга — ждём завершения OAuth через callback
+    context.chat_data['onboard_stage'] = 'awaiting_gcal_auth'
 
 
 # ---- Button Helper Functions ----
@@ -1435,6 +1430,12 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     elif waiting_for == 'task_duration':
         # Пользователь отвечает на вопрос о длительности задачи
+        if text.strip().lower() in ("cancel", "отмена", "отменить"):
+            context.user_data.pop('waiting_for', None)
+            context.user_data.pop('pending_event_data', None)
+            context.user_data.pop('pending_event_source', None)
+            await update.message.reply_text("❌ Task creation cancelled.", reply_markup=build_main_menu())
+            return
         pending_event = context.user_data.get('pending_event_data')
         pending_source = context.user_data.get('pending_event_source', 'text')
         if not pending_event:
@@ -1532,9 +1533,6 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 tz = pytz.timezone(user_tz)
                 now_local = datetime.now(tz)
                 
-                # Простой парсер для времени
-                import re
-                
                 # Пытаемся распарсить разные форматы времени
                 time_match = re.search(r'(\d{1,2}):(\d{2})', text)
                 if time_match:
@@ -1577,8 +1575,12 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     if context.chat_data.get('onboard_stage') == 'ask_name':
         # Вопрос об имени
         if text.strip():
-            set_user_name(chat_id, text.strip())
-            await ask_timezone(update, context)
+            try:
+                validated_name = _validate_user_input(text, "Name", max_length=100)
+                set_user_name(chat_id, validated_name)
+                await ask_timezone(update, context)
+            except ValueError as e:
+                await update.message.reply_text(f"❌ {e}\n\nPlease enter your name:")
         else:
             await update.message.reply_text(
                 "Please enter your name:"
@@ -1815,6 +1817,18 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             return
 
+    # Ожидание подключения Google Calendar после онбординга
+    if context.chat_data.get('onboard_stage') == 'awaiting_gcal_auth':
+        if is_onboarded(chat_id):
+            # Auth completed (callback already fired) — clear stage and proceed
+            context.chat_data.pop('onboard_stage', None)
+        else:
+            await update.message.reply_text(
+                "⏳ Please click the Google Calendar link above to finish setup.\n\n"
+                "Once you authorize, you'll be ready to add tasks!"
+            )
+            return
+
     # Обработка обычного текста как задачи
     if not is_onboarded(chat_id):
         await update.message.reply_text(
@@ -1832,7 +1846,14 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     chat_id = update.effective_chat.id
-    
+
+    if context.chat_data.get('onboard_stage') == 'awaiting_gcal_auth':
+        await update.message.reply_text(
+            "⏳ Please click the Google Calendar link above to finish setup.\n\n"
+            "Once you authorize, you'll be ready to add tasks!"
+        )
+        return
+
     if not is_onboarded(chat_id):
         await update.message.reply_text(
             "Please complete the setup first by sending /start"
@@ -1906,7 +1927,7 @@ def format_event_preview(event_data: Dict[str, str]) -> str:
         # Форматируем время
         start_str = start_dt.strftime("%a %d %b %H:%M")
         end_str = end_dt.strftime("%H:%M")
-    except:
+    except Exception:
         start_str = event_data.get("start_time", "")
         end_str = event_data.get("end_time", "")
     
@@ -2063,6 +2084,13 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
     chat_id = update.effective_chat.id
 
+    if context.chat_data.get('onboard_stage') == 'awaiting_gcal_auth':
+        await update.message.reply_text(
+            "⏳ Please click the Google Calendar link above to finish setup.\n\n"
+            "Once you authorize, you'll be ready to add tasks!"
+        )
+        return
+
     if not is_onboarded(chat_id):
         await update.message.reply_text(
             "Please complete the setup first by sending /start"
@@ -2087,6 +2115,13 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
         return
 
     chat_id = update.effective_chat.id
+
+    if context.chat_data.get('onboard_stage') == 'awaiting_gcal_auth':
+        await update.message.reply_text(
+            "⏳ Please click the Google Calendar link above to finish setup.\n\n"
+            "Once you authorize, you'll be ready to add tasks!"
+        )
+        return
 
     if not is_onboarded(chat_id):
         await update.message.reply_text(
@@ -2265,8 +2300,10 @@ async def handle_schedule_import(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data['state'] = 'WAITING_FOR_WEEKS'
     
     # Отправляем сообщение с вопросом о количестве недель
+    cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="schedule_weeks_cancel")]])
     await update.message.reply_text(
-        f"👀 I see a weekly schedule with {len(events)} classes. For how many weeks should I add this to your calendar? (e.g., write '10' or '12'):"
+        f"👀 I see a weekly schedule with {len(events)} classes. For how many weeks should I add this to your calendar? (e.g., write '10' or '12'):",
+        reply_markup=cancel_kb
     )
     
     track_event(chat_id, "schedule_import_initiated", {"source": source, "events_count": len(events)})
@@ -2275,14 +2312,21 @@ async def handle_schedule_import(update: Update, context: ContextTypes.DEFAULT_T
 async def handle_weeks_response(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
     """
     Обрабатывает ответ пользователя о количестве недель для расписания.
-    
+
     Args:
         update: Telegram Update object
         context: Context object
         text: Текст ответа пользователя
     """
     chat_id = update.effective_chat.id
-    
+
+    # Allow user to cancel via text
+    if text.strip().lower() in ("cancel", "отмена", "отменить"):
+        context.user_data.pop('state', None)
+        context.user_data.pop('pending_schedule', None)
+        await update.message.reply_text("❌ Schedule import cancelled.", reply_markup=build_main_menu())
+        return
+
     # Проверяем авторизацию Google Calendar
     stored_tokens = get_google_tokens(chat_id)
     if not stored_tokens:
@@ -2520,6 +2564,7 @@ async def _execute_schedule_creation(credentials, events_to_create: List[Dict], 
             event_url = create_event(credentials, event_data)
             if event_url:
                 events_created += 1
+            await asyncio.sleep(0.05)  # Avoid hitting Google Calendar API rate limits
         except Exception as e:
             print(f"[Bot] Error creating schedule event '{event_data.get('summary')}': {e}")
             continue
@@ -2853,10 +2898,12 @@ async def process_task(update: Update, context: ContextTypes.DEFAULT_TYPE, text:
                 context.user_data['pending_event_data'] = ai_parsed
                 context.user_data['pending_event_source'] = source
 
+                cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="cancel_task_duration")]])
                 await update.message.reply_text(
                     "⏱ Please specify how long this task will take.\n\n"
                     "Examples: <b>30</b>, <b>30 min</b>, <b>1h</b>, <b>1:30</b>",
-                    parse_mode='HTML'
+                    parse_mode='HTML',
+                    reply_markup=cancel_kb
                 )
                 return
         else:
@@ -2937,7 +2984,7 @@ async def show_daily_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             if dt.tzinfo:
                                 dt = dt.astimezone(pytz.timezone(user_timezone))
                                 time_str = dt.strftime('%H:%M')
-                    except:
+                    except Exception:
                         pass
                 message_text += f"  • {time_str} {summary}\n" if time_str else f"  • {summary}\n"
             message_text += "\n"
@@ -2964,9 +3011,9 @@ async def show_daily_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             if dt.tzinfo:
                                 dt = dt.astimezone(tz)
                                 time_str = dt.strftime('%H:%M')
-                    except:
+                    except Exception:
                         pass
-                
+
                 label_text = f"{time_str} {summary}" if time_str else summary
                 keyboard.extend(_build_task_row(event_id, label_text))
         
@@ -3311,10 +3358,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data.pop('pending_event_source', None)
         context.user_data.pop('waiting_for', None)
 
-        await query.edit_message_text(
-            "❌ Schedule import cancelled.",
-            reply_markup=build_main_menu()
-        )
+        await query.edit_message_text("❌ Schedule import cancelled.")
+        await query.message.reply_text("What would you like to do next?", reply_markup=build_main_menu())
         return
 
     elif callback_data in ("schedule_weeks_force", "schedule_weeks_skip", "schedule_weeks_cancel"):
@@ -3325,6 +3370,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
         if callback_data == "schedule_weeks_cancel" or not events_to_create:
             await query.edit_message_text("❌ Schedule import cancelled.")
+            await query.message.reply_text("What would you like to do next?", reply_markup=build_main_menu())
             return
 
         # Need credentials to create events
@@ -3484,6 +3530,16 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data.pop('pending_conflict_event', None)
         context.user_data.pop('pending_conflict_source', None)
         await query.edit_message_text("❌ Event creation cancelled.")
+        await query.message.reply_text("What would you like to do next?", reply_markup=build_main_menu())
+        return
+
+    elif callback_data == "cancel_task_duration":
+        await query.answer("")
+        context.user_data.pop('waiting_for', None)
+        context.user_data.pop('pending_event_data', None)
+        context.user_data.pop('pending_event_source', None)
+        await query.edit_message_text("❌ Task creation cancelled.")
+        await query.message.reply_text("What would you like to do next?", reply_markup=build_main_menu())
         return
 
     # Для остальных callback нужна авторизация Google Calendar
@@ -3572,7 +3628,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                                 if dt.tzinfo:
                                     dt = dt.astimezone(pytz.timezone(user_timezone))
                                     time_str = dt.strftime('%H:%M')
-                        except:
+                        except Exception:
                             pass
                     message_text += f"  • {time_str} {summary}\n" if time_str else f"  • {summary}\n"
                 message_text += "\n"
@@ -3599,7 +3655,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                                 if dt.tzinfo:
                                     dt = dt.astimezone(tz_obj)
                                     time_str = dt.strftime('%H:%M')
-                        except:
+                        except Exception:
                             pass
                     label_text = f"{time_str} {summary}" if time_str else summary
                     keyboard.extend(_build_task_row(event_id, label_text))
@@ -3682,7 +3738,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                                         if dt.tzinfo:
                                             dt = dt.astimezone(tz)
                                             time_str = dt.strftime('%H:%M')
-                                except:
+                                except Exception:
                                     pass
                             new_message_text += f"  • {time_str} {summary}\n" if time_str else f"  • {summary}\n"
                         new_message_text += "\n"
@@ -3712,7 +3768,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                                         if dt.tzinfo:
                                             dt = dt.astimezone(tz)
                                             time_str = dt.strftime('%H:%M')
-                                except:
+                                except Exception:
                                     pass
                             label_text = f"{time_str} {evt_summary}" if time_str else evt_summary
                             new_keyboard.extend(_build_task_row(event_id_item, label_text))
@@ -3764,7 +3820,6 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         
         if event_id and timestamp_str:
             try:
-                from datetime import timedelta
                 from googleapiclient.discovery import build
                 
                 # Восстанавливаем datetime из timestamp
@@ -3931,8 +3986,6 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     # Обработка переноса остатка задач на завтра
     elif callback_data == "reschedule_leftovers":
         try:
-            from datetime import timedelta
-            
             user_timezone = get_user_timezone(chat_id) or DEFAULT_TZ
             tz = pytz.timezone(user_timezone)
             now_local = datetime.now(tz)
@@ -4096,7 +4149,7 @@ def _check_event_conflicts(credentials, event_start_utc: datetime, event_end_utc
                         'start': e_start,
                         'end': e_end
                     })
-            except:
+            except Exception:
                 continue
         
         return conflicts

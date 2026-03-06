@@ -121,6 +121,7 @@ async def extract_events_from_image(image_path: str, user_timezone: str = "UTC")
                     "role": "system",
                     "content": """You are an expert in OCR and parsing university timetables and schedules from images.
 You must handle different languages (English, Russian, Italian, Spanish, etc.).
+Always respond with valid JSON.
 
 Analyze the image and determine if it shows:
 1. A SINGLE event/task - return single event format
@@ -250,7 +251,7 @@ CRITICAL RULES:
                             minute = int(parts[1])
                             end_hour = (hour + 1) % 24
                             end_time = f"{end_hour:02d}:{minute:02d}"
-                    except:
+                    except Exception:
                         end_time = ""
                 
                 if not start_time or not end_time:
@@ -265,7 +266,7 @@ CRITICAL RULES:
                     int(start_parts[1])
                     int(end_parts[0])
                     int(end_parts[1])
-                except:
+                except Exception:
                     continue
                 
                 valid_event = {
@@ -495,7 +496,7 @@ Return JSON with task information."""
                             minute = int(parts[1])
                             end_hour = (hour + 1) % 24
                             end_time = f"{end_hour:02d}:{minute:02d}"
-                    except:
+                    except Exception:
                         end_time = ""
                 
                 if not start_time or not end_time:
@@ -511,7 +512,7 @@ Return JSON with task information."""
                     int(start_parts[1])
                     int(end_parts[0])
                     int(end_parts[1])
-                except:
+                except Exception:
                     continue
                 
                 valid_event = {
