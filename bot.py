@@ -4267,13 +4267,39 @@ def main():
     con = get_con()
     try:
         cur = con.cursor()
-        cur.execute("INSERT OR IGNORE INTO app_lock (id, holder, acquired_utc) VALUES (1, ?, ?)", (holder, datetime.now(pytz.utc).isoformat()))
-        con.commit()
-        cur.execute("SELECT holder FROM app_lock WHERE id=1")
+        now_utc = datetime.now(pytz.utc)
+        stale_threshold_seconds = 180  # treat lock as stale after 3 minutes
+
+        cur.execute("SELECT holder, acquired_utc FROM app_lock WHERE id=1")
         row = cur.fetchone()
-        if row and row[0] and row[0] != holder:
-            print("[singleton-sqlite] Another instance is already running (holder=", row[0], ") — exiting.")
-            return
+
+        if row is None:
+            cur.execute("INSERT INTO app_lock (id, holder, acquired_utc) VALUES (1, ?, ?)",
+                        (holder, now_utc.isoformat()))
+            con.commit()
+        elif row[0] == holder:
+            # Same identity restarting — just refresh the timestamp
+            cur.execute("UPDATE app_lock SET acquired_utc=? WHERE id=1", (now_utc.isoformat(),))
+            con.commit()
+        else:
+            # Different holder — check if the lock is stale
+            stale = True
+            try:
+                lock_time = datetime.fromisoformat(row[1])
+                if lock_time.tzinfo is None:
+                    lock_time = pytz.utc.localize(lock_time)
+                stale = (now_utc - lock_time).total_seconds() > stale_threshold_seconds
+            except Exception:
+                pass  # unparseable timestamp → treat as stale
+
+            if stale:
+                print(f"[singleton-sqlite] Stale lock from '{row[0]}' (age>{stale_threshold_seconds}s), taking over.")
+                cur.execute("UPDATE app_lock SET holder=?, acquired_utc=? WHERE id=1",
+                            (holder, now_utc.isoformat()))
+                con.commit()
+            else:
+                print("[singleton-sqlite] Another instance is already running (holder=", row[0], ") — exiting.")
+                return
     finally:
         con.close()
 
