@@ -1848,11 +1848,14 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
     chat_id = update.effective_chat.id
 
     if context.chat_data.get('onboard_stage') == 'awaiting_gcal_auth':
-        await update.message.reply_text(
-            "⏳ Please click the Google Calendar link above to finish setup.\n\n"
-            "Once you authorize, you'll be ready to add tasks!"
-        )
-        return
+        if is_onboarded(chat_id):
+            context.chat_data.pop('onboard_stage', None)
+        else:
+            await update.message.reply_text(
+                "⏳ Please click the Google Calendar link above to finish setup.\n\n"
+                "Once you authorize, you'll be ready to add tasks!"
+            )
+            return
 
     if not is_onboarded(chat_id):
         await update.message.reply_text(
@@ -2085,11 +2088,14 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
     chat_id = update.effective_chat.id
 
     if context.chat_data.get('onboard_stage') == 'awaiting_gcal_auth':
-        await update.message.reply_text(
-            "⏳ Please click the Google Calendar link above to finish setup.\n\n"
-            "Once you authorize, you'll be ready to add tasks!"
-        )
-        return
+        if is_onboarded(chat_id):
+            context.chat_data.pop('onboard_stage', None)
+        else:
+            await update.message.reply_text(
+                "⏳ Please click the Google Calendar link above to finish setup.\n\n"
+                "Once you authorize, you'll be ready to add tasks!"
+            )
+            return
 
     if not is_onboarded(chat_id):
         await update.message.reply_text(
@@ -2117,11 +2123,14 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
     chat_id = update.effective_chat.id
 
     if context.chat_data.get('onboard_stage') == 'awaiting_gcal_auth':
-        await update.message.reply_text(
-            "⏳ Please click the Google Calendar link above to finish setup.\n\n"
-            "Once you authorize, you'll be ready to add tasks!"
-        )
-        return
+        if is_onboarded(chat_id):
+            context.chat_data.pop('onboard_stage', None)
+        else:
+            await update.message.reply_text(
+                "⏳ Please click the Google Calendar link above to finish setup.\n\n"
+                "Once you authorize, you'll be ready to add tasks!"
+            )
+            return
 
     if not is_onboarded(chat_id):
         await update.message.reply_text(
@@ -2407,13 +2416,10 @@ async def handle_weeks_response(update: Update, context: ContextTypes.DEFAULT_TY
         ).execute()
         existing_events = existing_result.get('items', [])
 
-        # Only consider events that were imported from a schedule ([SCHEDULE] tag)
-        schedule_existing = [
-            ev for ev in existing_events
-            if '[SCHEDULE]' in (ev.get('description') or '')
-        ]
+        # Check against ALL existing events (not just previously imported schedules)
+        schedule_existing = existing_events
 
-        # Check each new event against existing schedule events
+        # Check each new event against existing events
         seen_conflicts: set = set()
         for ev in events_to_create:
             new_start = datetime.fromisoformat(ev["start_time"].replace("Z", "+00:00"))
@@ -3404,10 +3410,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                     singleEvents=True,
                     orderBy='startTime'
                 ).execute()
-                schedule_existing2 = [
-                    ev for ev in existing_result2.get('items', [])
-                    if '[SCHEDULE]' in (ev.get('description') or '')
-                ]
+                # Check against ALL existing events (not just previously imported schedules)
+                schedule_existing2 = existing_result2.get('items', [])
                 for ev in events_to_create:
                     new_start = datetime.fromisoformat(ev["start_time"].replace("Z", "+00:00"))
                     new_end = datetime.fromisoformat(ev["end_time"].replace("Z", "+00:00"))
@@ -4138,9 +4142,19 @@ def _check_event_conflicts(credentials, event_start_utc: datetime, event_end_utc
                 continue
             
             try:
-                e_start = datetime.fromisoformat(event_start_iso.replace('Z', '+00:00'))
-                e_end = datetime.fromisoformat(event_end_iso.replace('Z', '+00:00'))
-                
+                # Handle all-day events (date-only, no 'T' in the string)
+                if 'T' not in event_start_iso:
+                    # All-day event: parse as midnight UTC so it gets a proper timezone
+                    e_start = pytz.utc.localize(datetime.strptime(event_start_iso, '%Y-%m-%d'))
+                    e_end = pytz.utc.localize(datetime.strptime(event_end_iso, '%Y-%m-%d'))
+                else:
+                    e_start = datetime.fromisoformat(event_start_iso.replace('Z', '+00:00'))
+                    e_end = datetime.fromisoformat(event_end_iso.replace('Z', '+00:00'))
+                    if e_start.tzinfo is None:
+                        e_start = pytz.utc.localize(e_start)
+                    if e_end.tzinfo is None:
+                        e_end = pytz.utc.localize(e_end)
+
                 # Check for overlap
                 if e_start < event_end_utc and e_end > event_start_utc:
                     conflicts.append({
@@ -4220,7 +4234,7 @@ async def create_calendar_event(update: Update, context: ContextTypes.DEFAULT_TY
         if end_dt.tzinfo is None:
             end_dt = pytz.utc.localize(end_dt)
 
-        conflicts = _check_event_conflicts(credentials, start_dt, end_dt)
+        conflicts = await asyncio.to_thread(_check_event_conflicts, credentials, start_dt, end_dt)
         if conflicts:
             user_tz = get_user_timezone(chat_id) or DEFAULT_TZ
             tz = pytz.timezone(user_tz)

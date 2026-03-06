@@ -161,7 +161,7 @@ For RECURRING WEEKLY SCHEDULE (timetable with days of week), return:
 }
 
 CRITICAL RULES:
-- If the image shows a weekly timetable with multiple classes on different days, it's a recurring schedule
+- If the image shows a weekly timetable/schedule with TWO OR MORE classes/events listed across different days, it's a recurring schedule. A single event shown on one day is NOT a recurring schedule.
 - Always normalize day names to English (e.g., "Lunedì" -> "Monday", "Martedì" -> "Tuesday")
 - Extract time in 24h format (e.g., "Ore 10:30" -> "10:30")
 - If you see a specific date (e.g., "16 febbraio"), use it for single events
@@ -373,7 +373,7 @@ JSON structure for RECURRING WEEKLY SCHEDULE:
 }
 
 CRITICAL RULES:
-1. DETECT RECURRING SCHEDULES: If text contains multiple events with days of week (e.g., "Monday 10:00 Math, Wednesday 14:00 History", "Mercoledì 12:15 Aula 4A, Giovedì 12:15 Aula 4A", "statistics\nMercoledì 12:15 - 13:45"), set "is_recurring_schedule": true and return the events array. Each event must have day_of_week (normalized to English), start_time and end_time in HH:MM format.
+1. DETECT RECURRING SCHEDULES: If text contains events listed across MULTIPLE different days of the week (e.g., "Monday 10:00 Math, Wednesday 14:00 History", "Mercoledì 12:15 Aula 4A, Giovedì 12:15 Aula 4A", "statistics\nMercoledì 12:15 - 13:45\nGiovedì 12:15 - 13:45"), set "is_recurring_schedule": true and return the events array. A SINGLE mention of a day of week with a time is NOT a recurring schedule — it is a single event (e.g., "Wednesday at 14:00 dentist" → single event on Wednesday). Only use recurring schedule when you see TWO OR MORE distinct day+time entries. Each event must have day_of_week (normalized to English), start_time and end_time in HH:MM format.
 1a. **CRITICAL for class schedules**: If the text STARTS with one or more lines that don't contain a day of week or time (these are the class/subject name lines), followed by schedule entries with days and times, extract the subject name from those initial lines and use it as the "summary" for ALL events in the schedule. Examples:
    - Input: "statistics\nMercoledì 12:15 - 13:45 Aula 4A" → all events get "summary": "statistics"
    - Input: "Math - Advanced\nMonday 10:00 - 11:30, Wednesday 14:00 - 15:30" → all events get "summary": "Math - Advanced"
