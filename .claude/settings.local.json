@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 bot.py)",
+      "Bash(where py)",
+      "Bash(py --version)",
+      "Bash(py bot.py)",
+      "Bash(dir /a \"c:\\\\Users\\\\User\\\\Desktop\\\\Docs\\\\Handsome-tracker\")",
+      "Bash(findstr /i \"env\")",
+      "Bash(dir \"c:\\\\Users\\\\User\\\\Desktop\\\\Docs\\\\Handsome-tracker\" /b)"
+    ]
+  }
+}

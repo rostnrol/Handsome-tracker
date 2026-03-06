@@ -8,6 +8,9 @@ from typing import Dict, Optional
 from datetime import datetime, timedelta
 import pytz
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from openai import AsyncOpenAI
 from openai import AuthenticationError, APIError
 
@@ -80,10 +83,20 @@ async def extract_events_from_image(image_path: str, user_timezone: str = "UTC")
         Словарь с событиями или None
     """
     if not client:
-        print("[AI Service] OPENAI_API_KEY не установлен")
+        print("[AI Service] OPENAI_API_KEY not set")
         return None
     try:
         # Читаем изображение и кодируем в base64
+        import os as _os
+        if not _os.path.exists(image_path):
+            print(f"[AI Service] Image file not found: {image_path}")
+            return None
+        file_size = _os.path.getsize(image_path)
+        if file_size == 0:
+            print(f"[AI Service] Image file is empty: {image_path}")
+            return None
+        print(f"[AI Service] Processing image: {image_path} ({file_size} bytes)")
+
         with open(image_path, "rb") as image_file:
             image_data = base64.b64encode(image_file.read()).decode('utf-8')
         
@@ -177,6 +190,8 @@ CRITICAL RULES:
         content = response.choices[0].message.content.strip()
         parsed = json.loads(content)
         
+        print(f"[AI Service] Image parsed response keys: {list(parsed.keys())}, is_recurring={parsed.get('is_recurring_schedule')}")
+
         # Проверяем, является ли это рекуррентным расписанием
         if parsed.get("is_recurring_schedule", False):
             # Валидация структуры расписания
@@ -272,21 +287,23 @@ CRITICAL RULES:
         if isinstance(parsed, dict) and "summary" in parsed:
             parsed["is_recurring_schedule"] = False
             return parsed
-        
+
+        print(f"[AI Service] Image response has no 'summary' key. Full response: {content[:300]}")
         return None
     except AuthenticationError as e:
-        print(f"[AI Service] Ошибка аутентификации OpenAI (Invalid API key) при обработке изображения: {e}")
+        print(f"[AI Service] OpenAI auth error processing image: {e}")
         return None
     except APIError as e:
-        print(f"[AI Service] Ошибка API OpenAI при обработке изображения: {e}")
+        print(f"[AI Service] OpenAI API error processing image (model=gpt-4o): {e}")
         return None
     except json.JSONDecodeError as e:
-        print(f"[AI Service] Ошибка парсинга JSON при обработке изображения: {e}")
-        print(f"[AI Service] Полученный контент: {content[:300] if 'content' in locals() else 'N/A'}")
+        print(f"[AI Service] JSON parse error from image response: {e}")
+        print(f"[AI Service] Raw content: {content[:500] if 'content' in locals() else 'N/A'}")
         return None
     except Exception as e:
-        print(f"[AI Service] Ошибка при обработке изображения: {type(e).__name__}: {e}")
-        return None
+        import traceback
+        print(f"[AI Service] Unexpected error processing image: {type(e).__name__}: {e}")
+        print(traceback.format_exc())
         return None
 
 

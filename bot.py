@@ -15,6 +15,9 @@ import asyncio
 import re
 from aiohttp import web
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import pytz
 
 from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, BotCommand, WebAppInfo, InlineKeyboardButton, InlineKeyboardMarkup
@@ -307,6 +310,15 @@ def init_db():
         """)
     except sqlite3.OperationalError:
         pass
+    # Добавляем колонны для управления длительностью задач
+    try:
+        cur.execute("ALTER TABLE settings ADD COLUMN use_default_duration INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cur.execute("ALTER TABLE settings ADD COLUMN default_task_duration INTEGER NOT NULL DEFAULT 30")
+    except sqlite3.OperationalError:
+        pass
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS app_lock (
@@ -439,6 +451,44 @@ def set_evening_time(chat_id: int, time_str: str):
         ON CONFLICT(chat_id) DO UPDATE SET evening_time=excluded.evening_time
         """,
         (chat_id, "09:00", time_str, chat_id),
+    )
+    con.commit()
+    con.close()
+
+
+def get_use_default_duration(chat_id: int) -> bool:
+    """Получает флаг использования дефолтной длительности задач"""
+    con = get_con()
+    cur = con.cursor()
+    cur.execute("SELECT use_default_duration FROM settings WHERE chat_id=?", (chat_id,))
+    row = cur.fetchone()
+    con.close()
+    return bool(row[0]) if row else False
+
+
+def get_default_task_duration(chat_id: int) -> int:
+    """Получает дефолтную длительность задачи в минутах"""
+    con = get_con()
+    cur = con.cursor()
+    cur.execute("SELECT default_task_duration FROM settings WHERE chat_id=?", (chat_id,))
+    row = cur.fetchone()
+    con.close()
+    return row[0] if row else 30
+
+
+def set_default_duration_settings(chat_id: int, use_default: bool, duration_minutes: int):
+    """Устанавливает настройки дефолтной длительности задач"""
+    con = get_con()
+    cur = con.cursor()
+    cur.execute(
+        """
+        INSERT INTO settings (chat_id, use_default_duration, default_task_duration, onboard_done)
+        VALUES (?, ?, ?, COALESCE((SELECT onboard_done FROM settings WHERE chat_id=?), 0))
+        ON CONFLICT(chat_id) DO UPDATE SET 
+            use_default_duration=excluded.use_default_duration,
+            default_task_duration=excluded.default_task_duration
+        """,
+        (chat_id, int(use_default), duration_minutes, chat_id),
     )
     con.commit()
     con.close()
@@ -710,6 +760,42 @@ async def ask_evening_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=build_evening_time_keyboard()
     )
     context.chat_data['onboard_stage'] = 'ask_evening_time'
+
+
+def build_default_duration_keyboard() -> ReplyKeyboardMarkup:
+    """Создает клавиатуру для выбора использования дефолтной длительности задач"""
+    keyboard = [
+        [KeyboardButton("✅ Yes, use default duration"), KeyboardButton("❌ No, ask me each time")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
+
+
+def build_duration_choice_keyboard() -> ReplyKeyboardMarkup:
+    """Создает клавиатуру для выбора дефолтной длительности задачи"""
+    keyboard = [
+        [KeyboardButton("15 min"), KeyboardButton("30 min"), KeyboardButton("1 hour")],
+        [KeyboardButton("1.5 hours"), KeyboardButton("2 hours"), KeyboardButton("✏️ Custom")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
+
+
+async def ask_default_duration_preference(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Вопрос о предпочтении использовать дефолтную длительность для задач"""
+    await update.message.reply_text(
+        "5️⃣ Should I use a default task duration when you don't specify one?\n\n"
+        "This makes creating tasks faster - just confirm without specifying length.",
+        reply_markup=build_default_duration_keyboard()
+    )
+    context.chat_data['onboard_stage'] = 'ask_default_duration_preference'
+
+
+async def ask_default_duration_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Вопрос о значении дефолтной длительности"""
+    await update.message.reply_text(
+        "6️⃣ What should be the default task duration?",
+        reply_markup=build_duration_choice_keyboard()
+    )
+    context.chat_data['onboard_stage'] = 'ask_default_duration_value'
 
 
 async def finish_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1625,7 +1711,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                     if 0 <= hour <= 23 and 0 <= minute <= 59:
                         time_str = f"{hour:02d}:{minute:02d}"
                         set_evening_time(chat_id, time_str)
-                        await finish_onboarding(update, context)
+                        await ask_default_duration_preference(update, context)
                         return
             raise ValueError("Invalid time format")
         except (ValueError, IndexError):
@@ -1646,7 +1732,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                     if 0 <= hour <= 23 and 0 <= minute <= 59:
                         time_str = f"{hour:02d}:{minute:02d}"
                         set_evening_time(chat_id, time_str)
-                        await finish_onboarding(update, context)
+                        await ask_default_duration_preference(update, context)
                         return
             raise ValueError("Invalid time format")
         except (ValueError, IndexError):
@@ -1654,6 +1740,80 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 "Invalid time format. Please enter time in HH:MM format (e.g., 21:00, 23:00):"
             )
         return
+
+    if context.chat_data.get('onboard_stage') == 'ask_default_duration_preference':
+        # Вопрос о предпочтении использВания дефолтной длительности
+        if "Yes" in text or "yes" in text:
+            # Пользователь хочет использовать дефолтную длительность
+            context.chat_data['use_default_duration'] = True
+            await ask_default_duration_value(update, context)
+            return
+        elif "No" in text or "no" in text:
+            # Пользователь хочет, чтобы мы спрашивали длительность каждый раз
+            context.chat_data['use_default_duration'] = False
+            set_default_duration_settings(chat_id, False, 30)
+            await finish_onboarding(update, context)
+            return
+        else:
+            await update.message.reply_text(
+                "Please choose an option:",
+                reply_markup=build_default_duration_keyboard()
+            )
+            return
+
+    if context.chat_data.get('onboard_stage') == 'ask_default_duration_value':
+        # Выбор дефолтной длительности задачи
+        use_default = context.chat_data.get('use_default_duration', True)
+        duration_map = {
+            "15 min": 15,
+            "15": 15,
+            "30 min": 30,
+            "30": 30,
+            "1 hour": 60,
+            "1": 60,
+            "60": 60,
+            "1.5 hours": 90,
+            "1.5": 90,
+            "90": 90,
+            "2 hours": 120,
+            "2": 120,
+            "120": 120,
+        }
+
+        if text in duration_map:
+            duration_minutes = duration_map[text]
+            set_default_duration_settings(chat_id, use_default, duration_minutes)
+            await finish_onboarding(update, context)
+            return
+        elif text == "✏️ Custom":
+            await update.message.reply_text(
+                "Please enter the default duration in minutes (e.g., 30, 45, 60):",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            context.chat_data['onboard_stage'] = 'ask_default_duration_custom'
+            return
+        else:
+            await update.message.reply_text(
+                "Please choose a duration from the options:",
+                reply_markup=build_duration_choice_keyboard()
+            )
+            return
+
+    if context.chat_data.get('onboard_stage') == 'ask_default_duration_custom':
+        # Пользователь вводит дефолтную длительность вручную
+        try:
+            use_default = context.chat_data.get('use_default_duration', True)
+            duration_minutes = int(text.strip())
+            if duration_minutes <= 0 or duration_minutes > 1440:
+                raise ValueError("Duration must be between 1 and 1440 minutes")
+            set_default_duration_settings(chat_id, use_default, duration_minutes)
+            await finish_onboarding(update, context)
+            return
+        except (ValueError, TypeError):
+            await update.message.reply_text(
+                "Invalid duration. Please enter a number between 1 and 1440 (minutes):"
+            )
+            return
 
     # Обработка обычного текста как задачи
     if not is_onboarded(chat_id):
@@ -1845,36 +2005,149 @@ async def show_schedule_preview(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
 
+async def _process_photo_file(update: Update, context: ContextTypes.DEFAULT_TYPE, file_id: str, suffix: str = '.jpg'):
+    """Shared logic for processing a photo or image document."""
+    chat_id = update.effective_chat.id
+    track_event(chat_id, "task_source_photo")
+
+    photo_file = await context.bot.get_file(file_id)
+
+    # Create temp file then close it immediately so download_to_drive can write
+    # to it freely (on Windows an open NamedTemporaryFile causes a lock error).
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
+        tmp_path = tmp_file.name
+    await photo_file.download_to_drive(tmp_path)
+
+    try:
+        file_size = os.path.getsize(tmp_path)
+        print(f"[Bot] Image downloaded: {tmp_path} ({file_size} bytes)")
+        if file_size == 0:
+            print("[Bot] Error: downloaded image file is empty")
+            await update.message.reply_text(
+                "❌ Couldn't download the image. Please try again.",
+                reply_markup=build_main_menu()
+            )
+            track_event(chat_id, "error", {"error_type": "image_download_empty"})
+            return
+
+        tz = get_user_timezone(chat_id) or DEFAULT_TZ
+        event_data = await extract_events_from_image(tmp_path, tz)
+
+        if not event_data:
+            await update.message.reply_text(
+                "❌ Couldn't find any events in the image.\n\n"
+                "Make sure the photo clearly shows a schedule, timetable, or a task with a time.\n"
+                "You can also send the task as a text message.",
+                reply_markup=build_main_menu()
+            )
+            track_event(chat_id, "error", {"error_type": "image_extraction_failed"})
+            return
+
+        if event_data.get("is_recurring_schedule", False):
+            await show_schedule_preview(update, context, event_data, source="photo")
+        else:
+            await show_event_preview(update, context, event_data, source="photo")
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            print(f"[Bot] Warning: Failed to delete temp file {tmp_path}: {e}")
+
+
 async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик фото"""
     if not update.message or not update.message.photo:
         return
-    
+
     chat_id = update.effective_chat.id
-    
+
     if not is_onboarded(chat_id):
         await update.message.reply_text(
             "Please complete the setup first by sending /start"
         )
         return
 
-    # Трекинг события
-    track_event(chat_id, "task_source_photo")
-    
     # Получаем фото наибольшего размера
     photo = update.message.photo[-1]
-    photo_file = await context.bot.get_file(photo.file_id)
-    
-    # Сохраняем во временный файл
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp_file:
-        await photo_file.download_to_drive(tmp_file.name)
-        tmp_path = tmp_file.name
-    
+    await _process_photo_file(update, context, photo.file_id, suffix='.jpg')
+
+
+async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles image files sent as documents (e.g. iPhone 'Send as File' or HEIC photos)."""
+    if not update.message or not update.message.document:
+        return
+
+    doc = update.message.document
+    mime = doc.mime_type or ""
+
+    # Only handle image documents
+    if not mime.startswith("image/"):
+        return
+
+    chat_id = update.effective_chat.id
+
+    if not is_onboarded(chat_id):
+        await update.message.reply_text(
+            "Please complete the setup first by sending /start"
+        )
+        return
+
+    # HEIC/HEIF (iPhone native format): convert to JPEG before processing
+    if mime in ("image/heic", "image/heif"):
+        await _process_heic_document(update, context, doc.file_id)
+        return
+
+    # Map MIME type to a temp file extension GPT-4o understands
+    mime_to_ext = {
+        "image/jpeg": ".jpg",
+        "image/jpg": ".jpg",
+        "image/png": ".png",
+        "image/webp": ".webp",
+        "image/gif": ".gif",
+    }
+    suffix = mime_to_ext.get(mime, ".jpg")
+
+    await _process_photo_file(update, context, doc.file_id, suffix=suffix)
+
+
+async def _process_heic_document(update: Update, context: ContextTypes.DEFAULT_TYPE, file_id: str):
+    """Downloads a HEIC file, converts it to JPEG, then runs the normal image processing."""
+    heic_path = None
+    jpeg_path = None
     try:
-        # Извлекаем события из фото
+        import pillow_heif
+        from PIL import Image
+        pillow_heif.register_heif_opener()
+    except ImportError:
+        await update.message.reply_text(
+            "📸 Please send the photo using the 📎 attachment icon and choose "
+            "<b>Photo</b> (not File). Telegram will compress it to a format the AI can read.",
+            parse_mode='HTML',
+            reply_markup=build_main_menu()
+        )
+        return
+
+    try:
+        photo_file = await context.bot.get_file(file_id)
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.heic') as hf:
+            heic_path = hf.name
+        await photo_file.download_to_drive(heic_path)
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as jf:
+            jpeg_path = jf.name
+
+        with Image.open(heic_path) as img:
+            img.convert('RGB').save(jpeg_path, 'JPEG', quality=90)
+
+        # Process the converted JPEG
+        chat_id = update.effective_chat.id
+        track_event(chat_id, "task_source_photo")
         tz = get_user_timezone(chat_id) or DEFAULT_TZ
-        event_data = await extract_events_from_image(tmp_path, tz)
-        
+        event_data = await extract_events_from_image(jpeg_path, tz)
+
         if not event_data:
             await update.message.reply_text(
                 "❌ Couldn't extract events from the image. Please try again or send as text.",
@@ -1883,21 +2156,24 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
             track_event(chat_id, "error", {"error_type": "image_extraction_failed"})
             return
 
-        # Проверяем, является ли это рекуррентным расписанием
         if event_data.get("is_recurring_schedule", False):
-            # Показываем предпросмотр расписания
             await show_schedule_preview(update, context, event_data, source="photo")
         else:
-            # Показываем предпросмотр события
             await show_event_preview(update, context, event_data, source="photo")
+
+    except Exception as e:
+        print(f"[Bot] Error processing HEIC image: {e}")
+        await update.message.reply_text(
+            "❌ Couldn't process the HEIC image. Please try sending as a regular photo.",
+            reply_markup=build_main_menu()
+        )
     finally:
-        # Удаляем временный файл
-        try:
-            os.unlink(tmp_path)
-        except FileNotFoundError:
-            pass  # File already deleted - OK
-        except OSError as e:
-            print(f"[Bot] Warning: Failed to delete temp file {tmp_path}: {e}")
+        for path in (heic_path, jpeg_path):
+            if path:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
 
 
 def get_next_occurrence_of_weekday(start_date: datetime, target_weekday: str) -> datetime:
@@ -2053,109 +2329,201 @@ async def handle_weeks_response(update: Update, context: ContextTypes.DEFAULT_TY
     user_timezone = get_user_timezone(chat_id) or DEFAULT_TZ
     tz = pytz.timezone(user_timezone)
     now_local = datetime.now(tz)
-    
+
     # Начинаем с сегодняшнего дня
     start_date = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-    
-    events_created = 0
-    
-    try:
-        # Цикл по неделям
-        for week in range(num_weeks):
-            # Для каждого события в расписании
-            for event in pending_schedule:
-                day_of_week = event.get("day_of_week")
-                start_time_str = event.get("start_time")
-                end_time_str = event.get("end_time")
-                summary = event.get("summary", "Event")
-                location = event.get("location", "")
-                
-                if not day_of_week or not start_time_str:
-                    continue
-                
-                # Вычисляем дату следующего вхождения дня недели
-                # Начинаем с today + (week * 7 дней)
-                week_start = start_date + timedelta(weeks=week)
-                event_date = get_next_occurrence_of_weekday(week_start, day_of_week)
-                
-                # Парсим время
-                try:
-                    start_parts = start_time_str.split(":")
-                    end_parts = end_time_str.split(":")
-                    if len(start_parts) != 2 or len(end_parts) != 2:
-                        continue
-                    
-                    start_hour = int(start_parts[0])
-                    start_minute = int(start_parts[1])
-                    end_hour = int(end_parts[0])
-                    end_minute = int(end_parts[1])
-                    
-                    # Валидация времени
-                    if not (0 <= start_hour <= 23 and 0 <= start_minute <= 59 and 
-                            0 <= end_hour <= 23 and 0 <= end_minute <= 59):
-                        continue
-                    
-                    # Создаем datetime для начала и конца события
-                    # Убеждаемся, что timezone сохраняется (replace сохраняет tzinfo)
-                    event_start = event_date.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
-                    event_end = event_date.replace(hour=end_hour, minute=end_minute, second=0, microsecond=0)
-                    
-                    # Если end_time меньше start_time, значит событие переходит на следующий день
-                    # Но только если разница разумная (например, 23:00 - 01:00, а не 10:00 - 09:00)
-                    if event_end <= event_start:
-                        # Проверяем, что это действительно переход через полночь (end_hour < start_hour)
-                        if end_hour < start_hour or (end_hour == start_hour and end_minute < start_minute):
-                            event_end = event_end + timedelta(days=1)
-                        else:
-                            # Если end_time просто меньше, но не переход через полночь, добавляем час
-                            event_end = event_start + timedelta(hours=1)
-                    
-                    # Конвертируем в UTC для API
-                    event_start_utc = event_start.astimezone(pytz.utc)
-                    event_end_utc = event_end.astimezone(pytz.utc)
-                    
-                    # Формируем данные события
-                    event_data = {
-                        "summary": summary,
-                        "start_time": event_start_utc.isoformat(),
-                        "end_time": event_end_utc.isoformat(),
-                        "description": "",
-                        "location": location
-                    }
-                    
-                    # Создаем событие в календаре (без проверки доступности)
-                    try:
-                        event_url = create_event(credentials, event_data)
-                        if event_url:
-                            events_created += 1
-                    except Exception as create_error:
-                        # Логируем ошибку, но продолжаем создавать остальные события
-                        print(f"[Bot] Ошибка при создании события '{summary}' из расписания: {create_error}")
-                        continue
-                    
-                except (ValueError, IndexError) as e:
-                    print(f"[Bot] Ошибка при парсинге события из расписания: {e}")
-                    continue
-        
-        # Отправляем подтверждение
+
+    # Build the full list of events to create (without creating them yet)
+    events_to_create = _build_schedule_event_list(pending_schedule, num_weeks, start_date)
+
+    if not events_to_create:
         await update.message.reply_text(
-            f"✅ Added schedule for {num_weeks} weeks! Created {events_created} event(s).",
+            "❌ No valid events could be parsed from the schedule.",
             reply_markup=build_main_menu()
         )
-        
-        track_event(chat_id, "schedule_imported", {"weeks": num_weeks, "events_created": events_created})
-        
-    except Exception as e:
-        print(f"[Bot] Ошибка при импорте расписания: {e}")
-        await update.message.reply_text(
-            f"❌ An error occurred while importing the schedule: {str(e)[:100]}",
-            reply_markup=build_main_menu()
-        )
-        track_event(chat_id, "error", {"error_type": "schedule_import_failed", "error_message": str(e)[:100]})
-    finally:
-        # Очищаем состояние
         context.user_data.pop('state', None)
         context.user_data.pop('pending_schedule', None)
+        return
+
+    # Check for conflicts with existing [SCHEDULE] events
+    conflict_lines = []
+    try:
+        from googleapiclient.discovery import build as gcal_build
+        service = gcal_build('calendar', 'v3', credentials=credentials)
+
+        # Fetch all events in the import date range in one call
+        range_start = events_to_create[0]["start_time"]
+        range_end = events_to_create[-1]["end_time"]
+        existing_result = service.events().list(
+            calendarId='primary',
+            timeMin=range_start,
+            timeMax=range_end,
+            singleEvents=True,
+            orderBy='startTime'
+        ).execute()
+        existing_events = existing_result.get('items', [])
+
+        # Only consider events that were imported from a schedule ([SCHEDULE] tag)
+        schedule_existing = [
+            ev for ev in existing_events
+            if '[SCHEDULE]' in (ev.get('description') or '')
+        ]
+
+        # Check each new event against existing schedule events
+        seen_conflicts: set = set()
+        for ev in events_to_create:
+            new_start = datetime.fromisoformat(ev["start_time"].replace("Z", "+00:00"))
+            new_end = datetime.fromisoformat(ev["end_time"].replace("Z", "+00:00"))
+            if new_start.tzinfo is None:
+                new_start = pytz.utc.localize(new_start)
+            if new_end.tzinfo is None:
+                new_end = pytz.utc.localize(new_end)
+
+            for ex in schedule_existing:
+                ex_start_str = (ex.get('start') or {}).get('dateTime') or (ex.get('start') or {}).get('date')
+                ex_end_str = (ex.get('end') or {}).get('dateTime') or (ex.get('end') or {}).get('date')
+                if not ex_start_str or not ex_end_str:
+                    continue
+                try:
+                    ex_start = datetime.fromisoformat(ex_start_str.replace("Z", "+00:00"))
+                    ex_end = datetime.fromisoformat(ex_end_str.replace("Z", "+00:00"))
+                    if ex_start.tzinfo is None:
+                        ex_start = pytz.utc.localize(ex_start)
+                    if ex_end.tzinfo is None:
+                        ex_end = pytz.utc.localize(ex_end)
+                except Exception:
+                    continue
+                if new_start < ex_end and new_end > ex_start:
+                    ex_start_local = ex_start.astimezone(tz)
+                    conflict_key = (ex.get('id', ''), ex_start_local.strftime('%a %H:%M'))
+                    if conflict_key not in seen_conflicts:
+                        seen_conflicts.add(conflict_key)
+                        ex_end_local = ex_end.astimezone(tz)
+                        conflict_lines.append(
+                            f"• {ex_start_local.strftime('%a %H:%M')}–{ex_end_local.strftime('%H:%M')} {ex.get('summary', 'Event')}"
+                        )
+                    break
+    except Exception as e:
+        print(f"[Bot] Warning: Could not check schedule conflicts: {e}")
+
+    if conflict_lines:
+        # Store state for confirmation callbacks
+        context.user_data['pending_schedule_events'] = events_to_create
+        conflict_summary = "\n".join(conflict_lines[:5])
+        if len(conflict_lines) > 5:
+            conflict_summary += f"\n• ... and {len(conflict_lines) - 5} more"
+        await update.message.reply_text(
+            f"⚠️ This schedule conflicts with {len(conflict_lines)} existing schedule slot(s):\n"
+            f"{conflict_summary}\n\n"
+            "Would you like to import anyway (skipping conflicts), import all, or cancel?",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✅ Skip conflicts", callback_data="schedule_weeks_skip"),
+                    InlineKeyboardButton("⚠️ Import all", callback_data="schedule_weeks_force"),
+                ],
+                [InlineKeyboardButton("❌ Cancel", callback_data="schedule_weeks_cancel")]
+            ])
+        )
+        track_event(chat_id, "schedule_import_conflicts_found", {"conflicts": len(conflict_lines)})
+        context.user_data.pop('state', None)
+        context.user_data.pop('pending_schedule', None)
+        return
+
+    # No conflicts – proceed with creation
+    events_created = await _execute_schedule_creation(credentials, events_to_create, include_conflicts=True)
+    await update.message.reply_text(
+        f"✅ Added schedule for {num_weeks} weeks! Created {events_created} event(s).",
+        reply_markup=build_main_menu()
+    )
+    track_event(chat_id, "schedule_imported", {"weeks": num_weeks, "events_created": events_created})
+    context.user_data.pop('state', None)
+    context.user_data.pop('pending_schedule', None)
+
+
+def _build_schedule_event_list(pending_schedule: List[Dict], num_weeks: int, start_date: datetime) -> List[Dict]:
+    """
+    Builds the full list of event dicts for a schedule import without creating them.
+    Returns a list of event dicts ready for create_event().
+    """
+    tz = start_date.tzinfo
+    events_list = []
+    for week in range(num_weeks):
+        for event in pending_schedule:
+            day_of_week = event.get("day_of_week")
+            start_time_str = event.get("start_time")
+            end_time_str = event.get("end_time")
+            summary = event.get("summary", "Event")
+            location = event.get("location", "")
+
+            if not day_of_week or not start_time_str:
+                continue
+
+            week_start = start_date + timedelta(weeks=week)
+            try:
+                event_date = get_next_occurrence_of_weekday(week_start, day_of_week)
+            except ValueError:
+                continue
+
+            try:
+                start_parts = start_time_str.split(":")
+                end_parts = (end_time_str or "").split(":")
+                if len(start_parts) != 2 or len(end_parts) != 2:
+                    continue
+
+                start_hour = int(start_parts[0])
+                start_minute = int(start_parts[1])
+                end_hour = int(end_parts[0])
+                end_minute = int(end_parts[1])
+
+                if not (0 <= start_hour <= 23 and 0 <= start_minute <= 59 and
+                        0 <= end_hour <= 23 and 0 <= end_minute <= 59):
+                    continue
+
+                event_start = event_date.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
+                event_end = event_date.replace(hour=end_hour, minute=end_minute, second=0, microsecond=0)
+
+                if event_end <= event_start:
+                    if end_hour < start_hour or (end_hour == start_hour and end_minute < start_minute):
+                        event_end = event_end + timedelta(days=1)
+                    else:
+                        event_end = event_start + timedelta(hours=1)
+
+                event_start_utc = event_start.astimezone(pytz.utc)
+                event_end_utc = event_end.astimezone(pytz.utc)
+
+                events_list.append({
+                    "summary": summary,
+                    "start_time": event_start_utc.isoformat(),
+                    "end_time": event_end_utc.isoformat(),
+                    "description": "[SCHEDULE]",
+                    "location": location,
+                })
+            except (ValueError, IndexError) as e:
+                print(f"[Bot] Error building schedule event: {e}")
+                continue
+
+    return events_list
+
+
+async def _execute_schedule_creation(credentials, events_to_create: List[Dict], include_conflicts: bool = True,
+                                     conflict_starts: Optional[set] = None) -> int:
+    """
+    Creates all events in events_to_create.
+    If include_conflicts=False, skips events whose start_time is in conflict_starts (ISO strings).
+    Returns the number of events successfully created.
+    """
+    events_created = 0
+    for event_data in events_to_create:
+        if not include_conflicts and conflict_starts and event_data["start_time"] in conflict_starts:
+            continue
+        try:
+            event_url = create_event(credentials, event_data)
+            if event_url:
+                events_created += 1
+        except Exception as e:
+            print(f"[Bot] Error creating schedule event '{event_data.get('summary')}': {e}")
+            continue
+    return events_created
 
 
 def _find_best_matching_event_for_text(events: List[Dict], text_lower: str, user_timezone: str) -> Optional[Dict]:
@@ -2464,28 +2832,36 @@ async def process_task(update: Update, context: ContextTypes.DEFAULT_TYPE, text:
             "has_location": bool(ai_parsed.get("location"))
         })
         
-        # Если модель использовала дефолтную длительность (или не указала флаг),
-        # запрашиваем её у пользователя явно. При отсутствии поля считаем,
-        # что длительность была "угадана", а не явно указана.
+        # Check if duration was inferred (not explicitly specified by user)
         duration_inferred = bool(ai_parsed.get("duration_was_inferred", True))
-        if duration_inferred:
-            context.user_data['waiting_for'] = 'task_duration'
-            context.user_data['pending_event_data'] = ai_parsed
-            context.user_data['pending_event_source'] = source
-
-            await update.message.reply_text(
-                "⏱ Please specify how long this task will take.\n\n"
-                "Examples: <b>30</b>, <b>30 min</b>, <b>1h</b>, <b>1:30</b>",
-                parse_mode='HTML'
-            )
-            return
         
-        # Для голоса и фото показываем предпросмотр события
-        if source in ("voice", "photo"):
-            await show_event_preview(update, context, ai_parsed, source=source)
+        if duration_inferred:
+            # Duration was not specified by user
+            use_default = get_use_default_duration(chat_id)
+            
+            if use_default:
+                # User wants to use default duration - apply it and show preview
+                default_duration = get_default_task_duration(chat_id)
+                start_dt = datetime.fromisoformat(ai_parsed["start_time"].replace("Z", "+00:00"))
+                end_dt = start_dt + timedelta(minutes=default_duration)
+                ai_parsed["end_time"] = end_dt.isoformat()
+                ai_parsed["duration_minutes"] = default_duration
+                await show_event_preview(update, context, ai_parsed, source=source)
+            else:
+                # User wants to be asked for duration each time
+                context.user_data['waiting_for'] = 'task_duration'
+                context.user_data['pending_event_data'] = ai_parsed
+                context.user_data['pending_event_source'] = source
+
+                await update.message.reply_text(
+                    "⏱ Please specify how long this task will take.\n\n"
+                    "Examples: <b>30</b>, <b>30 min</b>, <b>1h</b>, <b>1:30</b>",
+                    parse_mode='HTML'
+                )
+                return
         else:
-            # Для текста сразу создаём событие в календаре
-            await create_calendar_event(update, context, ai_parsed, source=source)
+            # Duration was explicitly specified - just show preview
+            await show_event_preview(update, context, ai_parsed, source=source)
         
     except Exception as e:
         print(f"[Bot] Ошибка при обработке задачи: {e}")
@@ -2929,16 +3305,98 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     elif callback_data == "schedule_cancel":
         await query.answer("")  # тихий ответ
-        
+
         # Очищаем сохраненные данные
         context.user_data.pop('pending_schedule_preview', None)
         context.user_data.pop('pending_event_source', None)
         context.user_data.pop('waiting_for', None)
-        
+
         await query.edit_message_text(
             "❌ Schedule import cancelled.",
             reply_markup=build_main_menu()
         )
+        return
+
+    elif callback_data in ("schedule_weeks_force", "schedule_weeks_skip", "schedule_weeks_cancel"):
+        await query.answer("")
+        events_to_create = context.user_data.pop('pending_schedule_events', None)
+        context.user_data.pop('state', None)
+        context.user_data.pop('pending_schedule', None)
+
+        if callback_data == "schedule_weeks_cancel" or not events_to_create:
+            await query.edit_message_text("❌ Schedule import cancelled.")
+            return
+
+        # Need credentials to create events
+        stored_tokens = get_google_tokens(chat_id)
+        if not stored_tokens:
+            await query.edit_message_text("❌ Authorization error. Please reconnect your Google Calendar using /start")
+            return
+        credentials = await _get_credentials_or_notify(
+            chat_id, stored_tokens,
+            lambda t: query.edit_message_text(t)
+        )
+        if not credentials:
+            return
+
+        if callback_data == "schedule_weeks_force":
+            events_created = await _execute_schedule_creation(credentials, events_to_create, include_conflicts=True)
+        else:
+            # skip conflicts: re-check and skip conflicting ones
+            user_timezone = get_user_timezone(chat_id) or DEFAULT_TZ
+            tz = pytz.timezone(user_timezone)
+            conflict_starts: set = set()
+            try:
+                from googleapiclient.discovery import build as gcal_build2
+                service2 = gcal_build2('calendar', 'v3', credentials=credentials)
+                range_start = events_to_create[0]["start_time"]
+                range_end = events_to_create[-1]["end_time"]
+                existing_result2 = service2.events().list(
+                    calendarId='primary',
+                    timeMin=range_start,
+                    timeMax=range_end,
+                    singleEvents=True,
+                    orderBy='startTime'
+                ).execute()
+                schedule_existing2 = [
+                    ev for ev in existing_result2.get('items', [])
+                    if '[SCHEDULE]' in (ev.get('description') or '')
+                ]
+                for ev in events_to_create:
+                    new_start = datetime.fromisoformat(ev["start_time"].replace("Z", "+00:00"))
+                    new_end = datetime.fromisoformat(ev["end_time"].replace("Z", "+00:00"))
+                    if new_start.tzinfo is None:
+                        new_start = pytz.utc.localize(new_start)
+                    if new_end.tzinfo is None:
+                        new_end = pytz.utc.localize(new_end)
+                    for ex in schedule_existing2:
+                        ex_s = (ex.get('start') or {}).get('dateTime') or (ex.get('start') or {}).get('date')
+                        ex_e = (ex.get('end') or {}).get('dateTime') or (ex.get('end') or {}).get('date')
+                        if not ex_s or not ex_e:
+                            continue
+                        try:
+                            ex_start = datetime.fromisoformat(ex_s.replace("Z", "+00:00"))
+                            ex_end = datetime.fromisoformat(ex_e.replace("Z", "+00:00"))
+                            if ex_start.tzinfo is None:
+                                ex_start = pytz.utc.localize(ex_start)
+                            if ex_end.tzinfo is None:
+                                ex_end = pytz.utc.localize(ex_end)
+                        except Exception:
+                            continue
+                        if new_start < ex_end and new_end > ex_start:
+                            conflict_starts.add(ev["start_time"])
+                            break
+            except Exception as e:
+                print(f"[Bot] Error re-checking schedule conflicts: {e}")
+
+            events_created = await _execute_schedule_creation(
+                credentials, events_to_create, include_conflicts=False, conflict_starts=conflict_starts
+            )
+
+        await query.edit_message_text(
+            f"✅ Schedule imported! Created {events_created} event(s).",
+        )
+        track_event(chat_id, "schedule_imported", {"events_created": events_created})
         return
 
     # Обработка редактирования события
@@ -2968,7 +3426,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     elif callback_data == "cancel_edit":
         await query.answer("")  # тихий ответ
-        
+
         # Показываем предпросмотр еще раз
         event_data = context.user_data.get('pending_event_preview')
         if event_data:
@@ -2981,6 +3439,51 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             context.user_data['waiting_for'] = 'event_confirmation'
         else:
             await query.edit_message_text("Event data not found.")
+        return
+
+    elif callback_data == "conflict_proceed":
+        await query.answer("")
+        event_data = context.user_data.pop('pending_conflict_event', None)
+        source = context.user_data.pop('pending_conflict_source', 'unknown')
+        if not event_data:
+            await query.edit_message_text("❌ Event data not found. Please try again.")
+            return
+        stored_tokens = get_google_tokens(chat_id)
+        if not stored_tokens:
+            await query.edit_message_text("❌ Authorization error. Please reconnect your Google Calendar using /start")
+            return
+        credentials = await _get_credentials_or_notify(
+            chat_id, stored_tokens,
+            lambda t: query.edit_message_text(t)
+        )
+        if not credentials:
+            return
+        await _do_create_and_confirm(update, context, credentials, event_data, source)
+        return
+
+    elif callback_data == "conflict_change_time":
+        await query.answer("")
+        event_data = context.user_data.pop('pending_conflict_event', None)
+        context.user_data.pop('pending_conflict_source', None)
+        if not event_data:
+            await query.edit_message_text("❌ Event data not found. Please try again.")
+            return
+        # Put the event back into the edit preview flow
+        context.user_data['pending_event_preview'] = event_data
+        context.user_data['waiting_for'] = 'event_confirmation'
+        preview_text = format_event_preview(event_data)
+        await query.edit_message_text(
+            preview_text,
+            parse_mode='HTML',
+            reply_markup=build_event_preview_buttons()
+        )
+        return
+
+    elif callback_data == "conflict_cancel":
+        await query.answer("")
+        context.user_data.pop('pending_conflict_event', None)
+        context.user_data.pop('pending_conflict_source', None)
+        await query.edit_message_text("❌ Event creation cancelled.")
         return
 
     # Для остальных callback нужна авторизация Google Calendar
@@ -3531,15 +4034,87 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             track_event(chat_id, "error", {"error_type": "reschedule_tasks", "error_message": str(e)[:100]})
 
 
+def _check_event_conflicts(credentials, event_start_utc: datetime, event_end_utc: datetime, exclude_event_id: str = None) -> List[Dict]:
+    """
+    Checks if an event conflicts with existing events.
+    
+    Args:
+        credentials: Google Calendar credentials
+        event_start_utc: Event start time (UTC)
+        event_end_utc: Event end time (UTC)
+        exclude_event_id: Event ID to exclude from conflict check (optional)
+    
+    Returns:
+        List of conflicting events (empty if no conflicts)
+    """
+    try:
+        from google.oauth2.credentials import Credentials
+        from google.auth.transport.requests import Request
+        from googleapiclient.discovery import build
+        
+        # Refresh credentials if needed
+        if credentials.expired:
+            credentials.refresh(Request())
+        
+        service = build('calendar', 'v3', credentials=credentials)
+        
+        # Query for events in the time range
+        events_result = service.events().list(
+            calendarId='primary',
+            timeMin=event_start_utc.isoformat(),
+            timeMax=event_end_utc.isoformat(),
+            singleEvents=True,
+            orderBy='startTime'
+        ).execute()
+        
+        events = events_result.get('items', [])
+        
+        conflicts = []
+        for event in events:
+            if exclude_event_id and event.get('id') == exclude_event_id:
+                continue
+            
+            event_start = event.get('start', {})
+            event_end = event.get('end', {})
+            
+            # Handle both dateTime and date formats
+            event_start_iso = event_start.get('dateTime') or event_start.get('date')
+            event_end_iso = event_end.get('dateTime') or event_end.get('date')
+            
+            if not event_start_iso or not event_end_iso:
+                continue
+            
+            try:
+                e_start = datetime.fromisoformat(event_start_iso.replace('Z', '+00:00'))
+                e_end = datetime.fromisoformat(event_end_iso.replace('Z', '+00:00'))
+                
+                # Check for overlap
+                if e_start < event_end_utc and e_end > event_start_utc:
+                    conflicts.append({
+                        'id': event.get('id'),
+                        'summary': event.get('summary', 'Event'),
+                        'start': e_start,
+                        'end': e_end
+                    })
+            except:
+                continue
+        
+        return conflicts
+    except Exception as e:
+        print(f"[Bot] Error checking event conflicts: {e}")
+        return []
+
+
 async def create_calendar_event(update: Update, context: ContextTypes.DEFAULT_TYPE, event_data: Dict, source: str):
     """Создает событие в Google Calendar"""
     chat_id = update.effective_chat.id
-    
+    reply_fn = update.effective_message.reply_text
+
     # Проверяем авторизацию
     print(f"[Bot] create_calendar_event вызван для chat_id={chat_id}, source={source}")
     has_auth = has_google_auth(chat_id)
     print(f"[Bot] Результат проверки авторизации для chat_id={chat_id}: {has_auth}")
-    
+
     if not has_auth:
         # Дополнительная проверка - может быть токены есть, но refresh_token отсутствует
         stored_tokens = get_google_tokens(chat_id)
@@ -3549,64 +4124,112 @@ async def create_calendar_event(update: Update, context: ContextTypes.DEFAULT_TY
             print(f"[Bot] - refresh_token: {'есть' if stored_tokens.get('refresh_token') else 'нет'}")
             print(f"[Bot] - client_id: {'есть' if stored_tokens.get('client_id') else 'нет'}")
             print(f"[Bot] - client_secret: {'есть' if stored_tokens.get('client_secret') else 'нет'}")
-        
+
         # Формируем redirect_uri для callback (используем тот же логику, что и в finish_onboarding)
         base_url = os.getenv("BASE_URL")
         if not base_url:
             port = int(os.getenv("PORT", 8000))
             base_url = f"http://localhost:{port}"
         redirect_uri = f"{base_url}/google/callback"
-        
+
         auth_url = get_authorization_url(chat_id, redirect_uri)
         print(f"[Bot] Отправляем ссылку на авторизацию Google Calendar для chat_id={chat_id}")
-        await update.message.reply_text(
+        await reply_fn(
             f"🔗 Please connect your Google Calendar first:\n\n"
             f'<a href="{auth_url}">🔗 Connect Google Calendar</a>',
             reply_markup=build_main_menu(),
             parse_mode='HTML'
         )
         return
-    
+
     # Получаем credentials
     stored_tokens = get_google_tokens(chat_id)
     if not stored_tokens:
-        await update.message.reply_text(
+        await reply_fn(
             "❌ Authorization error. Please reconnect your Google Calendar using /start",
             reply_markup=build_main_menu()
         )
         return
-    
+
     credentials = await _get_credentials_or_notify(
         chat_id, stored_tokens,
-        lambda t: update.message.reply_text(t, reply_markup=build_main_menu())
+        lambda t: reply_fn(t, reply_markup=build_main_menu())
     )
     if not credentials:
         return
-    
+
+    # Check for conflicts with existing events
+    try:
+        start_dt = datetime.fromisoformat(event_data["start_time"].replace("Z", "+00:00"))
+        end_dt = datetime.fromisoformat(event_data["end_time"].replace("Z", "+00:00"))
+        if start_dt.tzinfo is None:
+            start_dt = pytz.utc.localize(start_dt)
+        if end_dt.tzinfo is None:
+            end_dt = pytz.utc.localize(end_dt)
+
+        conflicts = _check_event_conflicts(credentials, start_dt, end_dt)
+        if conflicts:
+            user_tz = get_user_timezone(chat_id) or DEFAULT_TZ
+            tz = pytz.timezone(user_tz)
+            lines = []
+            for c in conflicts[:3]:
+                c_start = c['start'].astimezone(tz)
+                c_end = c['end'].astimezone(tz)
+                lines.append(f"• {c_start.strftime('%H:%M')}–{c_end.strftime('%H:%M')} {c['summary']}")
+            if len(conflicts) > 3:
+                lines.append("• ...")
+
+            context.user_data['pending_conflict_event'] = event_data
+            context.user_data['pending_conflict_source'] = source
+
+            conflict_text = "⚠️ This event overlaps with:\n" + "\n".join(lines)
+            conflict_text += "\n\nWould you like to add it anyway or change the time?"
+
+            markup = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✅ Add anyway", callback_data="conflict_proceed"),
+                    InlineKeyboardButton("✏️ Change time", callback_data="conflict_change_time"),
+                ],
+                [InlineKeyboardButton("❌ Cancel", callback_data="conflict_cancel")]
+            ])
+            await reply_fn(conflict_text, reply_markup=markup)
+            return
+    except Exception as e:
+        print(f"[Bot] Error checking conflicts before event creation: {e}")
+        # Continue with creation even if conflict check fails
+
     # Создаем событие
+    await _do_create_and_confirm(update, context, credentials, event_data, source)
+
+
+async def _do_create_and_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE, credentials, event_data: Dict, source: str):
+    """Actually creates the calendar event and sends confirmation."""
+    chat_id = update.effective_chat.id
+    reply_fn = update.effective_message.reply_text
+
     event_url = create_event(credentials, event_data)
-    
+
     if event_url:
         # Успешно создано
         track_event(chat_id, "calendar_event_created", {
             "source": source,
             "summary": event_data.get("summary", "")[:50]
         })
-        
+
         tz = get_user_timezone(chat_id) or DEFAULT_TZ
         start_dt = datetime.fromisoformat(event_data["start_time"].replace("Z", "+00:00"))
         # Убеждаемся, что timezone установлен правильно
         if start_dt.tzinfo is None:
             start_dt = pytz.utc.localize(start_dt)
         start_local = start_dt.astimezone(pytz.timezone(tz))
-        
-        await update.message.reply_text(
+
+        await reply_fn(
             f"✅ Event added: {event_data.get('summary', 'Task')} at {start_local.strftime('%H:%M')}",
             reply_markup=build_main_menu()
         )
     else:
         track_event(chat_id, "error", {"error_type": "calendar_event_creation_failed"})
-        await update.message.reply_text(
+        await reply_fn(
             "❌ Failed to create calendar event. Please try again.",
             reply_markup=build_main_menu()
         )
@@ -3819,6 +4442,7 @@ def main():
     app.add_handler(MessageHandler(filters.LOCATION, location_handler))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
+    app.add_handler(MessageHandler(filters.Document.IMAGE, handle_document_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
     app.add_handler(CallbackQueryHandler(handle_callback_query))
 
