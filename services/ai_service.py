@@ -560,17 +560,14 @@ Return JSON with task information."""
         try:
             start_dt = datetime.fromisoformat(parsed_data["start_time"].replace("Z", "+00:00"))
             end_dt = datetime.fromisoformat(parsed_data["end_time"].replace("Z", "+00:00"))
-            
-            # Нормализуем timezone: конвертируем в UTC для внутреннего хранения
-            if start_dt.tzinfo is None:
-                start_dt = pytz.utc.localize(start_dt)
-            else:
-                start_dt = start_dt.astimezone(pytz.utc)
-            
-            if end_dt.tzinfo is None:
-                end_dt = pytz.utc.localize(end_dt)
-            else:
-                end_dt = end_dt.astimezone(pytz.utc)
+
+            # Strip any offset returned by the AI and re-localize in user's timezone.
+            # GPT models often return +00:00 (UTC) instead of the user's local offset,
+            # but the date/time values themselves are correct in local terms.
+            # Store in local timezone (with offset) so format_event_preview can display correctly.
+            tz_obj = pytz.timezone(user_timezone)
+            start_dt = tz_obj.localize(start_dt.replace(tzinfo=None))
+            end_dt = tz_obj.localize(end_dt.replace(tzinfo=None))
             
             # Safety correction: if AI returned a future time that is actually in the past, move to tomorrow.
             # Also correct the reverse: if AI returned tomorrow but the same time today is still in the future
@@ -595,15 +592,23 @@ Return JSON with task information."""
                     )
                     if today_candidate > now_local:
                         # Today's time hasn't passed — check that user didn't explicitly say "tomorrow"
+                        # or a specific day of week (e.g. "Mon", "Monday") which must NOT be moved to today
+                        user_text_lower = text.lower()
                         tomorrow_keywords = [
                             "tomorrow", "завтра", "next day", "следующий день",
                         ]
-                        user_text_lower = text.lower()
+                        day_keywords = [
+                            "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+                            "mon", "tue", "wed", "thu", "fri", "sat", "sun",
+                            "понедельник", "вторник", "среда", "среду", "четверг",
+                            "пятница", "пятницу", "суббота", "субботу", "воскресенье",
+                        ]
                         user_said_tomorrow = any(kw in user_text_lower for kw in tomorrow_keywords)
-                        if not user_said_tomorrow:
-                            # Correct: use today instead of tomorrow
+                        user_said_day = any(kw in user_text_lower for kw in day_keywords)
+                        if not user_said_tomorrow and not user_said_day:
+                            # Correct: use today instead of tomorrow (keep in local timezone)
                             duration = end_dt - start_dt
-                            start_dt = today_candidate.astimezone(pytz.utc)
+                            start_dt = today_candidate
                             end_dt = start_dt + duration
             
             # Убеждаемся, что end_time >= start_time
@@ -630,7 +635,7 @@ Return JSON with task information."""
             else:
                 parsed_data["duration_was_inferred"] = True
             
-            # Сохраняем нормализованные времена в ISO формате (UTC)
+            # Сохраняем нормализованные времена в ISO формате (local timezone with offset)
             parsed_data["start_time"] = start_dt.isoformat()
             parsed_data["end_time"] = end_dt.isoformat()
             

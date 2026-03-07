@@ -637,7 +637,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "You can send me tasks in <b>any format:</b>\n"
         "• Text\n"
         "• Voice messages\n"
-        "• Or even Photos of notes/schedules.\n\n"
+        "• or even Photos of notes/schedules.\n\n"
         "You can add one or several events at a time.\n\n"
         "You can even add a schedule of your regular meetings or classes.\n\n"
         "I will instantly add them to your <u>Google Calendar.</u>\n"
@@ -3456,7 +3456,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     # Обработка редактирования события
     elif callback_data == "edit_title":
         await query.answer("")  # тихий ответ
-        await query.message.reply_text(
+        await query.edit_message_text(
             "📋 Enter new event title:"
         )
         context.user_data['waiting_for'] = 'edit_event_title'
@@ -3464,7 +3464,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     elif callback_data == "edit_location":
         await query.answer("")  # тихий ответ
-        await query.message.reply_text(
+        await query.edit_message_text(
             "📍 Enter new location:"
         )
         context.user_data['waiting_for'] = 'edit_event_location'
@@ -3472,8 +3472,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     elif callback_data == "edit_time":
         await query.answer("")  # тихий ответ
-        await query.message.reply_text(
-            "🕐 Enter new time (e.g., 'tomorrow at 3pm' or '2026-02-16 14:00'):"
+        await query.edit_message_text(
+            "🕐 Enter new time (e.g., 'Mon 21:00' or '14:30'):"
         )
         context.user_data['waiting_for'] = 'edit_event_time'
         return
@@ -4296,7 +4296,7 @@ async def _do_create_and_confirm(update: Update, context: ContextTypes.DEFAULT_T
         start_local = start_dt.astimezone(pytz.timezone(tz))
 
         await reply_fn(
-            f"✅ Event added: {event_data.get('summary', 'Task')} at {start_local.strftime('%H:%M')}",
+            f"✅ Event added: {event_data.get('summary', 'Task')} on {start_local.strftime('%a %d %b')} at {start_local.strftime('%H:%M')}",
             reply_markup=build_main_menu()
         )
     else:
