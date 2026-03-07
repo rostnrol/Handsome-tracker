@@ -170,8 +170,22 @@ def _parse_duration_to_minutes(text: str) -> int:
 
 def _clear_reschedule_state(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Clear all reschedule-related state variables"""
-    for key in ['waiting_for', 'rescheduling_event_id', 'reschedule_conflict_start']:
+    for key in ['waiting_for', 'rescheduling_event_id', 'reschedule_conflict_start', 'reschedule_prompt_msg_id']:
         context.user_data.pop(key, None)
+
+
+async def _clear_reschedule_prompt(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    """Remove the inline cancel button from the reschedule prompt message."""
+    msg_id = context.user_data.pop('reschedule_prompt_msg_id', None)
+    if msg_id:
+        try:
+            await context.bot.edit_message_reply_markup(
+                chat_id=chat_id,
+                message_id=msg_id,
+                reply_markup=None
+            )
+        except Exception:
+            pass
 
 
 def _clear_event_preview_state(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -182,8 +196,23 @@ def _clear_event_preview_state(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 def _clear_schedule_import_state(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Clear all schedule import state variables"""
-    for key in ['state', 'pending_schedule', 'waiting_for', 'pending_schedule_preview', 'pending_event_source']:
+    for key in ['state', 'pending_schedule', 'waiting_for', 'pending_schedule_preview', 'pending_event_source',
+                'schedule_weeks_prompt_msg_id']:
         context.user_data.pop(key, None)
+
+
+async def _clear_schedule_weeks_prompt(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    """Remove the inline cancel button from the 'for how many weeks?' prompt message."""
+    msg_id = context.user_data.pop('schedule_weeks_prompt_msg_id', None)
+    if msg_id:
+        try:
+            await context.bot.edit_message_reply_markup(
+                chat_id=chat_id,
+                message_id=msg_id,
+                reply_markup=None
+            )
+        except Exception:
+            pass
 
 
 def _validate_user_input(text: str, field_name: str, max_length: int = 255) -> str:
@@ -882,21 +911,29 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         user_name = get_user_name(chat_id)
         has_calendar = has_google_auth(chat_id)
         
+        use_default_dur = get_use_default_duration(chat_id)
+        default_dur = get_default_task_duration(chat_id)
+
         settings_text = f"⚙️ Settings\n\n"
         if user_name:
             settings_text += f"Name: {user_name}\n"
         settings_text += f"Timezone: {tz}\n"
         settings_text += f"Morning briefing: {morning_time}\n"
-        settings_text += f"Evening recap: {evening_time}\n\n"
-        settings_text += "Google Calendar: "
+        settings_text += f"Evening recap: {evening_time}\n"
+        if use_default_dur:
+            settings_text += f"Task duration: {default_dur} min (default)\n"
+        else:
+            settings_text += "Task duration: ask each time\n"
+        settings_text += "\nGoogle Calendar: "
         settings_text += "connected\n\n" if has_calendar else "not connected\n\n"
         settings_text += "Select what you want to change:"
-        
+
         keyboard_rows = [
             [InlineKeyboardButton("✏️ Change Name", callback_data="set_name")],
             [InlineKeyboardButton("🌍 Change Timezone", callback_data="set_tz")],
             [InlineKeyboardButton("🌅 Morning Time", callback_data="set_morning")],
             [InlineKeyboardButton("🌙 Evening Time", callback_data="set_evening")],
+            [InlineKeyboardButton("⏱ Task Duration", callback_data="set_duration")],
         ]
         if has_calendar:
             keyboard_rows.append([InlineKeyboardButton("🔌 Disconnect Google Calendar", callback_data="disconnect_gcal")])
@@ -1237,6 +1274,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                                 else:
                                     time_display = f"{new_start_dt.strftime('%B %d')} at {time_str}"
 
+                                await _clear_reschedule_prompt(context, chat_id)
                                 await update.message.reply_text(
                                     f"✅ Task moved to {time_display} (duration {new_duration_minutes} min)!",
                                     reply_markup=build_main_menu()
@@ -1250,6 +1288,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                                 context.user_data.pop('reschedule_conflict_start', None)
                                 return
                             else:
+                                await _clear_reschedule_prompt(context, chat_id)
                                 await update.message.reply_text(
                                     "❌ Failed to reschedule. Please try again.",
                                     reply_markup=build_main_menu()
@@ -1369,6 +1408,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                     else:
                         time_display = f"{new_start_dt.strftime('%B %d')} at {time_str}"
                     
+                    await _clear_reschedule_prompt(context, chat_id)
                     await update.message.reply_text(
                         f"✅ Task moved to {time_display}!",
                         reply_markup=build_main_menu()
@@ -1379,6 +1419,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                     context.user_data.pop('rescheduling_event_id', None)
                     context.user_data.pop('reschedule_conflict_start', None)
                 else:
+                    await _clear_reschedule_prompt(context, chat_id)
                     await update.message.reply_text(
                         "❌ Failed to reschedule. Please try again.",
                         reply_markup=build_main_menu()
@@ -1423,6 +1464,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
         except Exception as e:
             print(f"[Bot] Ошибка при ручном переносе задачи: {e}")
+            await _clear_reschedule_prompt(context, chat_id)
             await update.message.reply_text(
                 "❌ An error occurred. Please try again.",
                 reply_markup=build_main_menu()
@@ -1431,7 +1473,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             context.user_data.pop('rescheduling_event_id', None)
             context.user_data.pop('reschedule_conflict_start', None)
         return
-    
+
     elif waiting_for == 'task_duration':
         # Пользователь отвечает на вопрос о длительности задачи
         if text.strip().lower() in ("cancel", "отмена", "отменить"):
@@ -1475,12 +1517,12 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             pending_event["duration_minutes"] = duration_minutes
             pending_event["duration_was_inferred"] = False
 
-            # Очищаем состояние до создания события
+            # Очищаем состояние duration-ожидания и показываем предпросмотр
             context.user_data.pop('waiting_for', None)
             context.user_data.pop('pending_event_data', None)
             context.user_data.pop('pending_event_source', None)
 
-            await create_calendar_event(update, context, pending_event, source=pending_source)
+            await show_event_preview(update, context, pending_event, source=pending_source)
         except Exception:
             await update.message.reply_text(
                 "❌ An error occurred while saving the task. Please try again.",
@@ -1494,85 +1536,128 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     # Обработка редактирования события при подтверждении
     elif waiting_for == 'edit_event_title':
         pending_event = context.user_data.get('pending_event_preview')
-        if pending_event:
-            try:
-                validated_title = _validate_user_input(text, "Title", max_length=255)
-                pending_event['summary'] = validated_title
-                # Показываем обновленный предпросмотр
-                preview_text = format_event_preview(pending_event)
-                await update.message.reply_text(
-                    preview_text,
-                    parse_mode='HTML',
-                    reply_markup=build_event_preview_buttons()
-                )
-                context.user_data['waiting_for'] = 'event_confirmation'
-            except ValueError as e:
-                await update.message.reply_text(f"❌ {str(e)}")
+        if not pending_event:
+            await update.message.reply_text("❌ No event in progress. Please start over.")
+            context.user_data.pop('waiting_for', None)
+            return
+        try:
+            validated_title = _validate_user_input(text, "Title", max_length=255)
+            pending_event['summary'] = validated_title
+            preview_text = format_event_preview(pending_event)
+            await update.message.reply_text(
+                preview_text,
+                parse_mode='HTML',
+                reply_markup=build_event_preview_buttons()
+            )
+            context.user_data['waiting_for'] = 'event_confirmation'
+        except ValueError as e:
+            await update.message.reply_text(f"❌ {str(e)}")
         return
-    
+
     elif waiting_for == 'edit_event_location':
         pending_event = context.user_data.get('pending_event_preview')
-        if pending_event:
+        if not pending_event:
+            await update.message.reply_text("❌ No event in progress. Please start over.")
+            context.user_data.pop('waiting_for', None)
+            return
+        # Allow empty/dash to clear location
+        stripped = text.strip()
+        if stripped in ('-', 'none', 'clear', ''):
+            pending_event['location'] = ''
+        else:
             try:
-                validated_location = _validate_user_input(text, "Location", max_length=255)
+                validated_location = _validate_user_input(stripped, "Location", max_length=255)
                 pending_event['location'] = validated_location
-                # Показываем обновленный предпросмотр
-                preview_text = format_event_preview(pending_event)
-                await update.message.reply_text(
-                    preview_text,
-                    parse_mode='HTML',
-                    reply_markup=build_event_preview_buttons()
-                )
-                context.user_data['waiting_for'] = 'event_confirmation'
             except ValueError as e:
                 await update.message.reply_text(f"❌ {str(e)}")
+                return
+        preview_text = format_event_preview(pending_event)
+        await update.message.reply_text(
+            preview_text,
+            parse_mode='HTML',
+            reply_markup=build_event_preview_buttons()
+        )
+        context.user_data['waiting_for'] = 'event_confirmation'
         return
     
     elif waiting_for == 'edit_event_time':
         pending_event = context.user_data.get('pending_event_preview')
-        if pending_event:
-            try:
-                # Пытаемся распарсить новое время
-                user_tz = get_user_timezone(chat_id) or DEFAULT_TZ
-                tz = pytz.timezone(user_tz)
-                now_local = datetime.now(tz)
-                
-                # Пытаемся распарсить разные форматы времени
-                time_match = re.search(r'(\d{1,2}):(\d{2})', text)
-                if time_match:
-                    new_hour = int(time_match.group(1))
-                    new_min = int(time_match.group(2))
-                    
-                    # Получаем существующую дату из pending_event
-                    start_dt = datetime.fromisoformat(pending_event['start_time'].replace('Z', '+00:00'))
-                    # Обновляем время
-                    new_start = start_dt.replace(hour=new_hour, minute=new_min)
-                    
-                    # Вычисляем end_time (сохраняя длительность)
-                    end_dt = datetime.fromisoformat(pending_event.get('end_time', '').replace('Z', '+00:00'))
-                    duration = end_dt - start_dt if 'end_time' in pending_event else timedelta(hours=1)
-                    new_end = new_start + duration
-                    
-                    pending_event['start_time'] = new_start.isoformat()
-                    pending_event['end_time'] = new_end.isoformat()
-                    
-                    # Показываем обновленный предпросмотр
-                    preview_text = format_event_preview(pending_event)
-                    await update.message.reply_text(
-                        preview_text,
-                        parse_mode='HTML',
-                        reply_markup=build_event_preview_buttons()
-                    )
-                    context.user_data['waiting_for'] = 'event_confirmation'
-                else:
-                    await update.message.reply_text(
-                        "❌ Couldn't parse the time. Please use HH:MM format (e.g., '14:30'):"
-                    )
-            except Exception as e:
-                print(f"[Bot] Ошибка при редактировании времени события: {e}")
+        if not pending_event:
+            await update.message.reply_text("❌ No event in progress. Please start over.")
+            context.user_data.pop('waiting_for', None)
+            return
+        try:
+            user_tz = get_user_timezone(chat_id) or DEFAULT_TZ
+            tz = pytz.timezone(user_tz)
+            now_local = datetime.now(tz)
+
+            time_match = re.search(r'(\d{1,2}):(\d{2})', text)
+            if not time_match:
                 await update.message.reply_text(
-                    "❌ An error occurred. Please try again or send the time in HH:MM format:"
+                    "❌ Couldn't parse the time. Please use HH:MM format (e.g., '14:30'):"
                 )
+                return
+
+            new_hour = int(time_match.group(1))
+            new_min = int(time_match.group(2))
+
+            # Parse existing start datetime in user's timezone
+            start_dt = datetime.fromisoformat(pending_event['start_time'].replace('Z', '+00:00'))
+            if start_dt.tzinfo is None:
+                start_dt = pytz.utc.localize(start_dt)
+            start_local = start_dt.astimezone(tz)
+
+            # Check if user also specified a day of week
+            dow_map = {
+                'monday': 0, 'mon': 0, 'tuesday': 1, 'tue': 1,
+                'wednesday': 2, 'wed': 2, 'thursday': 3, 'thu': 3,
+                'friday': 4, 'fri': 4, 'saturday': 5, 'sat': 5,
+                'sunday': 6, 'sun': 6,
+            }
+            text_words = re.split(r'\W+', text.lower())
+            mentioned_dow = None
+            for kw, wd in dow_map.items():
+                if kw in text_words:
+                    mentioned_dow = wd
+                    break
+
+            if mentioned_dow is not None:
+                today_wd = now_local.weekday()
+                days_ahead = (mentioned_dow - today_wd) % 7
+                target_date = now_local.date() + timedelta(days=days_ahead)
+                new_start_local = tz.localize(datetime(
+                    target_date.year, target_date.month, target_date.day,
+                    new_hour, new_min, 0
+                ))
+            else:
+                new_start_local = start_local.replace(hour=new_hour, minute=new_min, second=0, microsecond=0)
+
+            # Preserve duration
+            end_dt_raw = pending_event.get('end_time', '')
+            if end_dt_raw:
+                end_dt = datetime.fromisoformat(end_dt_raw.replace('Z', '+00:00'))
+                if end_dt.tzinfo is None:
+                    end_dt = pytz.utc.localize(end_dt)
+                duration = end_dt - start_dt
+            else:
+                duration = timedelta(hours=1)
+            new_end_local = new_start_local + duration
+
+            pending_event['start_time'] = new_start_local.isoformat()
+            pending_event['end_time'] = new_end_local.isoformat()
+
+            preview_text = format_event_preview(pending_event)
+            await update.message.reply_text(
+                preview_text,
+                parse_mode='HTML',
+                reply_markup=build_event_preview_buttons()
+            )
+            context.user_data['waiting_for'] = 'event_confirmation'
+        except Exception as e:
+            print(f"[Bot] Error editing event time: {e}")
+            await update.message.reply_text(
+                "❌ An error occurred. Please try again or send the time in HH:MM format:"
+            )
         return
     
     # Обработка онбординга
@@ -2001,7 +2086,7 @@ async def show_event_preview(update: Update, context: ContextTypes.DEFAULT_TYPE,
     context.user_data['pending_event_source'] = source
     context.user_data['waiting_for'] = 'event_confirmation'
     
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         preview_text,
         parse_mode='HTML',
         reply_markup=build_event_preview_buttons()
@@ -2026,7 +2111,7 @@ async def show_schedule_preview(update: Update, context: ContextTypes.DEFAULT_TY
     context.user_data['pending_event_source'] = source
     context.user_data['waiting_for'] = 'schedule_confirmation'
     
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         preview_text,
         parse_mode='HTML',
         reply_markup=build_schedule_buttons()
@@ -2277,13 +2362,14 @@ async def handle_schedule_import(update: Update, context: ContextTypes.DEFAULT_T
         return
     
     events = schedule_data["events"]
+    msg = update.effective_message  # works in both message and callback_query contexts
     if not events or len(events) == 0:
-        await update.message.reply_text(
+        await msg.reply_text(
             "❌ No valid events found in the schedule.",
             reply_markup=build_main_menu()
         )
         return
-    
+
     # Удаляем возможные дубликаты событий, которые иногда может вернуть AI
     unique_events = []
     seen_keys = set()
@@ -2299,26 +2385,27 @@ async def handle_schedule_import(update: Update, context: ContextTypes.DEFAULT_T
             continue
         seen_keys.add(key)
         unique_events.append(ev)
-    
+
     events = unique_events
     if not events:
-        await update.message.reply_text(
+        await msg.reply_text(
             "❌ No valid events found in the schedule.",
             reply_markup=build_main_menu()
         )
         return
-    
+
     # Сохраняем расписание в user_data (уже без дубликатов)
     context.user_data['pending_schedule'] = events
     context.user_data['state'] = 'WAITING_FOR_WEEKS'
-    
+
     # Отправляем сообщение с вопросом о количестве недель
     cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="schedule_weeks_cancel")]])
-    await update.message.reply_text(
+    weeks_prompt_msg = await msg.reply_text(
         f"👀 I see a weekly schedule with {len(events)} classes. For how many weeks should I add this to your calendar? (e.g., write '10' or '12'):",
         reply_markup=cancel_kb
     )
-    
+    context.user_data['schedule_weeks_prompt_msg_id'] = weeks_prompt_msg.message_id
+
     track_event(chat_id, "schedule_import_initiated", {"source": source, "events_count": len(events)})
 
 
@@ -2335,46 +2422,48 @@ async def handle_weeks_response(update: Update, context: ContextTypes.DEFAULT_TY
 
     # Allow user to cancel via text
     if text.strip().lower() in ("cancel", "отмена", "отменить"):
+        await _clear_schedule_weeks_prompt(context, chat_id)
         context.user_data.pop('state', None)
         context.user_data.pop('pending_schedule', None)
-        await update.message.reply_text("❌ Schedule import cancelled.", reply_markup=build_main_menu())
+        await update.effective_message.reply_text("❌ Schedule import cancelled.", reply_markup=build_main_menu())
         return
 
     # Проверяем авторизацию Google Calendar
     stored_tokens = get_google_tokens(chat_id)
     if not stored_tokens:
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             "❌ Please connect your Google Calendar first using /start",
             reply_markup=build_main_menu()
         )
         context.user_data.pop('state', None)
         context.user_data.pop('pending_schedule', None)
         return
-    
+
     credentials = await _get_credentials_or_notify(
         chat_id, stored_tokens,
-        lambda t: update.message.reply_text(t, reply_markup=build_main_menu())
+        lambda t: update.effective_message.reply_text(t, reply_markup=build_main_menu())
     )
     if not credentials:
         context.user_data.pop('state', None)
         context.user_data.pop('pending_schedule', None)
         return
-    
+
     # Парсим количество недель
     try:
         num_weeks = int(text.strip())
         if num_weeks <= 0 or num_weeks > 52:
             raise ValueError("Invalid number of weeks")
     except (ValueError, TypeError):
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             "❌ Please enter a valid number of weeks (1-52):"
         )
         return
-    
+
     # Получаем сохраненное расписание
     pending_schedule = context.user_data.get('pending_schedule')
     if not pending_schedule:
-        await update.message.reply_text(
+        await _clear_schedule_weeks_prompt(context, chat_id)
+        await update.effective_message.reply_text(
             "❌ Schedule data not found. Please try importing the schedule again.",
             reply_markup=build_main_menu()
         )
@@ -2394,7 +2483,8 @@ async def handle_weeks_response(update: Update, context: ContextTypes.DEFAULT_TY
     events_to_create = _build_schedule_event_list(pending_schedule, num_weeks, start_date)
 
     if not events_to_create:
-        await update.message.reply_text(
+        await _clear_schedule_weeks_prompt(context, chat_id)
+        await update.effective_message.reply_text(
             "❌ No valid events could be parsed from the schedule.",
             reply_markup=build_main_menu()
         )
@@ -2425,6 +2515,7 @@ async def handle_weeks_response(update: Update, context: ContextTypes.DEFAULT_TY
 
         # Check each new event against existing events
         seen_conflicts: set = set()
+        conflict_existing_ids: list = []
         for ev in events_to_create:
             new_start = datetime.fromisoformat(ev["start_time"].replace("Z", "+00:00"))
             new_end = datetime.fromisoformat(ev["end_time"].replace("Z", "+00:00"))
@@ -2448,34 +2539,43 @@ async def handle_weeks_response(update: Update, context: ContextTypes.DEFAULT_TY
                 except Exception:
                     continue
                 if new_start < ex_end and new_end > ex_start:
+                    ex_id = ex.get('id', '')
                     ex_start_local = ex_start.astimezone(tz)
-                    conflict_key = (ex.get('id', ''), ex_start_local.strftime('%a %H:%M'))
+                    conflict_key = (ex_id, ex_start_local.strftime('%a %H:%M'))
                     if conflict_key not in seen_conflicts:
                         seen_conflicts.add(conflict_key)
                         ex_end_local = ex_end.astimezone(tz)
                         conflict_lines.append(
-                            f"• {ex_start_local.strftime('%a %H:%M')}–{ex_end_local.strftime('%H:%M')} {ex.get('summary', 'Event')}"
+                            f"• {ex_start_local.strftime('%a %d %b %H:%M')}–{ex_end_local.strftime('%H:%M')} {ex.get('summary', 'Event')}"
                         )
+                        if ex_id and ex_id not in conflict_existing_ids:
+                            conflict_existing_ids.append(ex_id)
                     break
     except Exception as e:
         print(f"[Bot] Warning: Could not check schedule conflicts: {e}")
 
     if conflict_lines:
+        # Clear the "for how many weeks?" prompt now that we're moving to the conflict picker
+        await _clear_schedule_weeks_prompt(context, chat_id)
         # Store state for confirmation callbacks
         context.user_data['pending_schedule_events'] = events_to_create
+        context.user_data['pending_schedule_conflict_ids'] = conflict_existing_ids
         conflict_summary = "\n".join(conflict_lines[:5])
         if len(conflict_lines) > 5:
             conflict_summary += f"\n• ... and {len(conflict_lines) - 5} more"
-        await update.message.reply_text(
-            f"⚠️ This schedule conflicts with {len(conflict_lines)} existing schedule slot(s):\n"
+        await update.effective_message.reply_text(
+            f"⚠️ New schedule conflicts with {len(conflict_lines)} existing event(s):\n"
             f"{conflict_summary}\n\n"
-            "Would you like to import anyway (skipping conflicts), import all, or cancel?",
+            "What would you like to do?",
             reply_markup=InlineKeyboardMarkup([
                 [
-                    InlineKeyboardButton("✅ Skip conflicts", callback_data="schedule_weeks_skip"),
-                    InlineKeyboardButton("⚠️ Import all", callback_data="schedule_weeks_force"),
+                    InlineKeyboardButton("🔄 Replace old", callback_data="schedule_weeks_replace"),
+                    InlineKeyboardButton("➕ Add both", callback_data="schedule_weeks_force"),
                 ],
-                [InlineKeyboardButton("❌ Cancel", callback_data="schedule_weeks_cancel")]
+                [
+                    InlineKeyboardButton("⏭ Skip conflicts", callback_data="schedule_weeks_skip"),
+                    InlineKeyboardButton("❌ Cancel", callback_data="schedule_weeks_cancel"),
+                ],
             ])
         )
         track_event(chat_id, "schedule_import_conflicts_found", {"conflicts": len(conflict_lines)})
@@ -2485,7 +2585,8 @@ async def handle_weeks_response(update: Update, context: ContextTypes.DEFAULT_TY
 
     # No conflicts – proceed with creation
     events_created = await _execute_schedule_creation(credentials, events_to_create, include_conflicts=True)
-    await update.message.reply_text(
+    await _clear_schedule_weeks_prompt(context, chat_id)
+    await update.effective_message.reply_text(
         f"✅ Added schedule for {num_weeks} weeks! Created {events_created} event(s).",
         reply_markup=build_main_menu()
     )
@@ -2853,12 +2954,8 @@ async def process_task(update: Update, context: ContextTypes.DEFAULT_TYPE, text:
 
         # Проверяем, является ли это рекуррентным расписанием
         if ai_parsed.get("is_recurring_schedule", False):
-            # Для голоса и фото показываем предпросмотр расписания
-            if source in ("voice", "photo"):
-                await show_schedule_preview(update, context, ai_parsed, source=source)
-            else:
-                # Для текста сразу импортируем
-                await handle_schedule_import(update, context, ai_parsed, source=source)
+            # Always show preview so user can confirm before import
+            await show_schedule_preview(update, context, ai_parsed, source=source)
             return
         
         # Проверяем, является ли это задачей
@@ -3071,8 +3168,6 @@ async def show_tasks_for_date(update: Update, context: ContextTypes.DEFAULT_TYPE
         if matched_dow is not None:
             current_dow = now_local.weekday()  # 0=Monday
             days_ahead = (matched_dow - current_dow) % 7
-            if days_ahead == 0:
-                days_ahead = 7  # next occurrence
             target_date = (now_local + timedelta(days=days_ahead)).date()
         else:
             # Try ISO format YYYY-MM-DD
@@ -3231,8 +3326,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     elif callback_data == "set_tz":
-        await query.answer("")  # Убираем дублирование текста кнопки
-        # Отправляем новое сообщение с ReplyKeyboardMarkup вместо редактирования
+        await query.answer("")
+        await query.edit_message_text("🌍 Changing timezone...")
         await query.message.reply_text(
             "🌍 Share your location or enter timezone manually:",
             reply_markup=build_timezone_keyboard()
@@ -3241,8 +3336,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     elif callback_data == "set_morning":
-        await query.answer("")  # Убираем дублирование текста кнопки
-        # Отправляем новое сообщение с ReplyKeyboardMarkup вместо редактирования
+        await query.answer("")
+        await query.edit_message_text("🌅 Changing morning briefing time...")
         await query.message.reply_text(
             "🌅 At what time do you want to receive your Daily Plan?\n\n"
             "Send time in HH:MM format (e.g., 09:00):",
@@ -3252,8 +3347,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     elif callback_data == "set_evening":
-        await query.answer("")  # Убираем дублирование текста кнопки
-        # Отправляем новое сообщение с ReplyKeyboardMarkup вместо редактирования
+        await query.answer("")
+        await query.edit_message_text("🌙 Changing evening recap time...")
         await query.message.reply_text(
             "🌙 When should I send you the Evening Recap?\n\n"
             "Send time in HH:MM format (e.g., 21:00):",
@@ -3291,30 +3386,82 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
         await query.edit_message_text(
             "🔌 Google Calendar has been disconnected.\n\n"
-            "You can connect a new account at any time from Settings or by typing /start.",
+            "You can connect a new account at any time from Settings or by typing /start."
         )
+        await query.message.reply_text("What would you like to do next?", reply_markup=build_main_menu())
+        return
+
+    elif callback_data == "set_duration":
+        await query.answer("")
+        use_default = get_use_default_duration(chat_id)
+        default_dur = get_default_task_duration(chat_id)
+        status = f"{default_dur} min default" if use_default else "ask each time"
+        keyboard = [
+            [InlineKeyboardButton("❓ Ask me each time", callback_data="duration_ask")],
+            [
+                InlineKeyboardButton("15 min", callback_data="duration_15"),
+                InlineKeyboardButton("30 min", callback_data="duration_30"),
+                InlineKeyboardButton("45 min", callback_data="duration_45"),
+            ],
+            [
+                InlineKeyboardButton("1h", callback_data="duration_60"),
+                InlineKeyboardButton("1.5h", callback_data="duration_90"),
+                InlineKeyboardButton("2h", callback_data="duration_120"),
+            ],
+        ]
+        await query.edit_message_text(
+            f"⏱ Task Duration\nCurrent: {status}\n\n"
+            "When a task has no specified duration, should I ask you or use a default?",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+
+    elif callback_data == "duration_ask":
+        await query.answer("")
+        set_default_duration_settings(chat_id, False, get_default_task_duration(chat_id))
+        await query.edit_message_text("✅ I'll ask you for duration each time it's not specified.")
+        return
+
+    elif callback_data.startswith("duration_"):
+        await query.answer("")
+        try:
+            mins = int(callback_data.split("_")[1])
+        except (IndexError, ValueError):
+            return
+        set_default_duration_settings(chat_id, True, mins)
+        if mins < 60:
+            label = f"{mins} min"
+        elif mins % 60 == 0:
+            label = f"{mins // 60}h"
+        else:
+            label = f"{mins // 60}h {mins % 60}min"
+        await query.edit_message_text(f"✅ Default task duration set to {label}.")
         return
 
     # Обработка подтверждения события из предпросмотра
     elif callback_data == "event_confirm":
         await query.answer("")  # тихий ответ
         chat_id = query.message.chat_id
-        
+
         # Получаем сохраненные данные события
         event_data = context.user_data.get('pending_event_preview')
         source = context.user_data.get('pending_event_source', 'unknown')
-        
+
         if not event_data:
             await query.edit_message_text("❌ Event data not found. Please try again.")
             return
-        
+
+        # Remove preview buttons immediately so user can't double-tap
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
         # Очищаем состояние
         context.user_data.pop('pending_event_preview', None)
         context.user_data.pop('pending_event_source', None)
         context.user_data.pop('waiting_for', None)
-        
-        # Создаем событие в календаре
-        # Нужно создать временный Update object для create_calendar_event
+
         await create_calendar_event(update, context, event_data, source=source)
         track_event(chat_id, "event_preview_confirmed", {"source": source})
         return
@@ -3372,9 +3519,10 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await query.message.reply_text("What would you like to do next?", reply_markup=build_main_menu())
         return
 
-    elif callback_data in ("schedule_weeks_force", "schedule_weeks_skip", "schedule_weeks_cancel"):
+    elif callback_data in ("schedule_weeks_force", "schedule_weeks_skip", "schedule_weeks_replace", "schedule_weeks_cancel"):
         await query.answer("")
         events_to_create = context.user_data.pop('pending_schedule_events', None)
+        conflict_existing_ids = context.user_data.pop('pending_schedule_conflict_ids', [])
         context.user_data.pop('state', None)
         context.user_data.pop('pending_schedule', None)
 
@@ -3395,12 +3543,28 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         if not credentials:
             return
 
-        if callback_data == "schedule_weeks_force":
+        if callback_data == "schedule_weeks_replace":
+            # Delete conflicting existing events, then import all new ones
+            deleted = 0
+            for eid in conflict_existing_ids:
+                try:
+                    ok = await asyncio.to_thread(cancel_event, credentials, eid)
+                    if ok:
+                        deleted += 1
+                except Exception as e:
+                    print(f"[Bot] Error deleting conflicting schedule event {eid}: {e}")
             events_created = await _execute_schedule_creation(credentials, events_to_create, include_conflicts=True)
+            await query.edit_message_text(
+                f"🔄 Replaced {deleted} old event(s). Created {events_created} new event(s)."
+            )
+        elif callback_data == "schedule_weeks_force":
+            # Add both — import all new events without deleting old ones
+            events_created = await _execute_schedule_creation(credentials, events_to_create, include_conflicts=True)
+            await query.edit_message_text(
+                f"✅ Schedule imported! Created {events_created} event(s) (kept existing ones too)."
+            )
         else:
-            # skip conflicts: re-check and skip conflicting ones
-            user_timezone = get_user_timezone(chat_id) or DEFAULT_TZ
-            tz = pytz.timezone(user_timezone)
+            # skip conflicts: re-check and skip new events that still conflict
             conflict_starts: set = set()
             try:
                 from googleapiclient.discovery import build as gcal_build2
@@ -3414,7 +3578,6 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                     singleEvents=True,
                     orderBy='startTime'
                 ).execute()
-                # Check against ALL existing events (not just previously imported schedules)
                 schedule_existing2 = existing_result2.get('items', [])
                 for ev in events_to_create:
                     new_start = datetime.fromisoformat(ev["start_time"].replace("Z", "+00:00"))
@@ -3446,10 +3609,10 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             events_created = await _execute_schedule_creation(
                 credentials, events_to_create, include_conflicts=False, conflict_starts=conflict_starts
             )
+            await query.edit_message_text(
+                f"✅ Schedule imported! Created {events_created} event(s) (conflicting slots skipped)."
+            )
 
-        await query.edit_message_text(
-            f"✅ Schedule imported! Created {events_created} event(s).",
-        )
         track_event(chat_id, "schedule_imported", {"events_created": events_created})
         return
 
@@ -3465,7 +3628,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     elif callback_data == "edit_location":
         await query.answer("")  # тихий ответ
         await query.edit_message_text(
-            "📍 Enter new location:"
+            "📍 Enter new location (or send '-' to clear it):"
         )
         context.user_data['waiting_for'] = 'edit_event_location'
         return
@@ -3495,10 +3658,39 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             await query.edit_message_text("Event data not found.")
         return
 
+    elif callback_data == "conflict_replace":
+        await query.answer("")
+        event_data = context.user_data.pop('pending_conflict_event', None)
+        source = context.user_data.pop('pending_conflict_source', 'unknown')
+        conflict_ids = context.user_data.pop('pending_conflict_ids', [])
+        if not event_data:
+            await query.edit_message_text("❌ Event data not found. Please try again.")
+            return
+        stored_tokens = get_google_tokens(chat_id)
+        if not stored_tokens:
+            await query.edit_message_text("❌ Authorization error. Please reconnect your Google Calendar using /start")
+            return
+        credentials = await _get_credentials_or_notify(
+            chat_id, stored_tokens,
+            lambda t: query.edit_message_text(t)
+        )
+        if not credentials:
+            return
+        # Delete the conflicting old events first
+        for eid in conflict_ids:
+            try:
+                await asyncio.to_thread(cancel_event, credentials, eid)
+            except Exception as e:
+                print(f"[Bot] Error deleting conflicting event {eid}: {e}")
+        await query.edit_message_text("🔄 Replacing old event(s)...")
+        await _do_create_and_confirm(update, context, credentials, event_data, source)
+        return
+
     elif callback_data == "conflict_proceed":
         await query.answer("")
         event_data = context.user_data.pop('pending_conflict_event', None)
         source = context.user_data.pop('pending_conflict_source', 'unknown')
+        context.user_data.pop('pending_conflict_ids', None)
         if not event_data:
             await query.edit_message_text("❌ Event data not found. Please try again.")
             return
@@ -3519,6 +3711,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await query.answer("")
         event_data = context.user_data.pop('pending_conflict_event', None)
         context.user_data.pop('pending_conflict_source', None)
+        context.user_data.pop('pending_conflict_ids', None)
         if not event_data:
             await query.edit_message_text("❌ Event data not found. Please try again.")
             return
@@ -3537,7 +3730,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await query.answer("")
         context.user_data.pop('pending_conflict_event', None)
         context.user_data.pop('pending_conflict_source', None)
-        await query.edit_message_text("❌ Event creation cancelled.")
+        context.user_data.pop('pending_conflict_ids', None)
+        await query.edit_message_text("🚫 Kept the existing event. New event was not added.")
         await query.message.reply_text("What would you like to do next?", reply_markup=build_main_menu())
         return
 
@@ -3903,39 +4097,39 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     # Обработка ручного ввода времени для переноса (должен быть перед общим reschedule_)
     elif callback_data.startswith("reschedule_manual_"):
         event_id = callback_data[18:]  # Убираем префикс "reschedule_manual_"
-        
+
         context.user_data['rescheduling_event_id'] = event_id
         context.user_data['waiting_for'] = 'reschedule_time'
-        
+
         cancel_keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("❌ Cancel reschedule", callback_data=f"cancel_reschedule_{event_id}")]
         ])
-        await query.message.reply_text(
+        prompt_msg = await query.message.reply_text(
             "📅 For what time to reschedule?\n\n"
             "Examples: <b>today 18:00</b>, <b>tomorrow 10:00</b>, <b>wed 14:30</b>, <b>15:00</b>",
             reply_markup=cancel_keyboard,
             parse_mode='HTML'
         )
+        context.user_data['reschedule_prompt_msg_id'] = prompt_msg.message_id
         await query.answer("")
-    
+
     # Обработка переноса задачи (resch_ or legacy reschedule_)
     elif callback_data.startswith("resch_") or (callback_data.startswith("reschedule_") and not callback_data.startswith("reschedule_manual_") and not callback_data.startswith("reschedule_leftovers")):
         event_id = callback_data[6:] if callback_data.startswith("resch_") else callback_data[11:]
-        
-        # Сохраняем event_id и запрашиваем у пользователя время
+
         context.user_data['rescheduling_event_id'] = event_id
         context.user_data['waiting_for'] = 'reschedule_time'
-        
-        # Отправляем сообщение с запросом времени и кнопкой отмены
+
         cancel_keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("❌ Cancel reschedule", callback_data=f"cancel_reschedule_{event_id}")]
         ])
-        await query.message.reply_text(
+        prompt_msg = await query.message.reply_text(
             "📅 For what time to reschedule?\n\n"
             "Examples: <b>today 18:00</b>, <b>tomorrow 10:00</b>, <b>wed 14:30</b>, <b>15:00</b>",
             reply_markup=cancel_keyboard,
             parse_mode='HTML'
         )
+        context.user_data['reschedule_prompt_msg_id'] = prompt_msg.message_id
         await query.answer("")
     
     # Обработка удаления задачи (del_ or legacy delete_)
@@ -3962,11 +4156,13 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     
     # Отмена операции переноса (не удаляет задачу)
     elif callback_data.startswith("cancel_reschedule_"):
-        # Always clear reschedule state regardless of which event triggered cancel
+        # Clear all reschedule state
+        await _clear_reschedule_prompt(context, chat_id)
         context.user_data.pop('waiting_for', None)
         context.user_data.pop('rescheduling_event_id', None)
         context.user_data.pop('reschedule_conflict_start', None)
         await query.edit_message_text("❌ Reschedule cancelled.")
+        await query.message.reply_text("What would you like to do next?", reply_markup=build_main_menu())
         await query.answer("")
 
     # Обработка отмены задачи (cancel_ - для обратной совместимости)
@@ -4247,22 +4443,26 @@ async def create_calendar_event(update: Update, context: ContextTypes.DEFAULT_TY
             for c in conflicts[:3]:
                 c_start = c['start'].astimezone(tz)
                 c_end = c['end'].astimezone(tz)
-                lines.append(f"• {c_start.strftime('%H:%M')}–{c_end.strftime('%H:%M')} {c['summary']}")
+                lines.append(f"• {c_start.strftime('%a %d %b %H:%M')}–{c_end.strftime('%H:%M')} {c['summary']}")
             if len(conflicts) > 3:
-                lines.append("• ...")
+                lines.append(f"• ... and {len(conflicts) - 3} more")
 
             context.user_data['pending_conflict_event'] = event_data
             context.user_data['pending_conflict_source'] = source
+            context.user_data['pending_conflict_ids'] = [c['id'] for c in conflicts if c.get('id')]
 
-            conflict_text = "⚠️ This event overlaps with:\n" + "\n".join(lines)
-            conflict_text += "\n\nWould you like to add it anyway or change the time?"
+            conflict_text = "⚠️ This event overlaps with existing event(s):\n" + "\n".join(lines)
+            conflict_text += "\n\nWhat would you like to do?"
 
             markup = InlineKeyboardMarkup([
                 [
-                    InlineKeyboardButton("✅ Add anyway", callback_data="conflict_proceed"),
+                    InlineKeyboardButton("🔄 Replace old", callback_data="conflict_replace"),
+                    InlineKeyboardButton("➕ Add both", callback_data="conflict_proceed"),
+                ],
+                [
+                    InlineKeyboardButton("🚫 Keep old", callback_data="conflict_cancel"),
                     InlineKeyboardButton("✏️ Change time", callback_data="conflict_change_time"),
                 ],
-                [InlineKeyboardButton("❌ Cancel", callback_data="conflict_cancel")]
             ])
             await reply_fn(conflict_text, reply_markup=markup)
             return

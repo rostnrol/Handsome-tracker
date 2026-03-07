@@ -2,6 +2,7 @@
 AI Service для обработки текста, голоса и фото с использованием OpenAI API
 """
 import os
+import re
 import json
 import base64
 from typing import Dict, Optional
@@ -568,48 +569,74 @@ Return JSON with task information."""
             tz_obj = pytz.timezone(user_timezone)
             start_dt = tz_obj.localize(start_dt.replace(tzinfo=None))
             end_dt = tz_obj.localize(end_dt.replace(tzinfo=None))
-            
-            # Safety correction: if AI returned a future time that is actually in the past, move to tomorrow.
-            # Also correct the reverse: if AI returned tomorrow but the same time today is still in the future
-            # AND the user didn't explicitly mention "tomorrow", use today instead.
-            now_utc = datetime.now(pytz.utc)
-            if start_dt < now_utc:
-                # Time is in the past — move to tomorrow
-                start_dt = start_dt + timedelta(days=1)
-                end_dt = end_dt + timedelta(days=1)
-            else:
-                # Time is in the future — check if AI unnecessarily pushed it to tomorrow
-                # when the same clock time today hasn't passed yet.
-                tz_obj = pytz.timezone(user_timezone)
+
+            # Check if user mentioned a specific day of week.
+            # If so, compute the correct date in Python — AI can return the wrong date
+            # for day abbreviations (e.g. "Mon" → Sunday instead of Monday).
+            day_to_weekday = {
+                "monday": 0, "mon": 0, "понедельник": 0, "пн": 0,
+                "tuesday": 1, "tue": 1, "вторник": 1, "вт": 1,
+                "wednesday": 2, "wed": 2, "среда": 2, "среду": 2, "ср": 2,
+                "thursday": 3, "thu": 3, "четверг": 3, "чт": 3,
+                "friday": 4, "fri": 4, "пятница": 4, "пятницу": 4, "пт": 4,
+                "saturday": 5, "sat": 5, "суббота": 5, "субботу": 5, "сб": 5,
+                "sunday": 6, "sun": 6, "воскресенье": 6, "вс": 6,
+            }
+            user_words = re.split(r'\W+', text.lower())
+            mentioned_weekday = None
+            for kw, wd in day_to_weekday.items():
+                if kw in user_words:
+                    mentioned_weekday = wd
+                    break
+
+            if mentioned_weekday is not None:
+                # User explicitly mentioned a weekday — override the AI's date with the correct one
                 now_local = datetime.now(tz_obj)
+                today_wd = now_local.weekday()  # 0=Monday, 6=Sunday
                 start_local = start_dt.astimezone(tz_obj)
-                tomorrow_local = now_local.date() + timedelta(days=1)
-                if start_local.date() == tomorrow_local:
-                    # AI chose tomorrow — check if same time today would still be in the future
-                    today_candidate = tz_obj.localize(
-                        datetime(now_local.year, now_local.month, now_local.day,
-                                 start_local.hour, start_local.minute, start_local.second)
-                    )
-                    if today_candidate > now_local:
-                        # Today's time hasn't passed — check that user didn't explicitly say "tomorrow"
-                        # or a specific day of week (e.g. "Mon", "Monday") which must NOT be moved to today
-                        user_text_lower = text.lower()
-                        tomorrow_keywords = [
-                            "tomorrow", "завтра", "next day", "следующий день",
-                        ]
-                        day_keywords = [
-                            "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
-                            "mon", "tue", "wed", "thu", "fri", "sat", "sun",
-                            "понедельник", "вторник", "среда", "среду", "четверг",
-                            "пятница", "пятницу", "суббота", "субботу", "воскресенье",
-                        ]
-                        user_said_tomorrow = any(kw in user_text_lower for kw in tomorrow_keywords)
-                        user_said_day = any(kw in user_text_lower for kw in day_keywords)
-                        if not user_said_tomorrow and not user_said_day:
-                            # Correct: use today instead of tomorrow (keep in local timezone)
-                            duration = end_dt - start_dt
-                            start_dt = today_candidate
-                            end_dt = start_dt + duration
+                days_ahead = (mentioned_weekday - today_wd) % 7
+                if days_ahead == 0:
+                    # Today is that weekday — check if the time has already passed
+                    today_at_time = tz_obj.localize(datetime(
+                        now_local.year, now_local.month, now_local.day,
+                        start_local.hour, start_local.minute, 0
+                    ))
+                    if today_at_time <= now_local:
+                        days_ahead = 7  # Use next week's occurrence
+                duration = end_dt - start_dt
+                target_date = now_local.date() + timedelta(days=days_ahead)
+                start_dt = tz_obj.localize(datetime(
+                    target_date.year, target_date.month, target_date.day,
+                    start_local.hour, start_local.minute, start_local.second
+                ))
+                end_dt = start_dt + duration
+            else:
+                # No specific day mentioned — apply past/tomorrow correction logic
+                now_utc = datetime.now(pytz.utc)
+                if start_dt < now_utc:
+                    # Time is in the past — move to tomorrow
+                    start_dt = start_dt + timedelta(days=1)
+                    end_dt = end_dt + timedelta(days=1)
+                else:
+                    # Time is in the future — check if AI unnecessarily pushed it to tomorrow
+                    # when the same clock time today hasn't passed yet.
+                    now_local = datetime.now(tz_obj)
+                    start_local = start_dt.astimezone(tz_obj)
+                    tomorrow_local = now_local.date() + timedelta(days=1)
+                    if start_local.date() == tomorrow_local:
+                        today_candidate = tz_obj.localize(
+                            datetime(now_local.year, now_local.month, now_local.day,
+                                     start_local.hour, start_local.minute, start_local.second)
+                        )
+                        if today_candidate > now_local:
+                            user_text_lower = text.lower()
+                            tomorrow_keywords = ["tomorrow", "завтра", "next day", "следующий день"]
+                            user_said_tomorrow = any(kw in user_text_lower for kw in tomorrow_keywords)
+                            if not user_said_tomorrow:
+                                # Correct: use today instead of tomorrow
+                                duration = end_dt - start_dt
+                                start_dt = today_candidate
+                                end_dt = start_dt + duration
             
             # Убеждаемся, что end_time >= start_time
             if end_dt < start_dt:
