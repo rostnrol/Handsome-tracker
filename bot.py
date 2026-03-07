@@ -880,9 +880,9 @@ def build_schedule_buttons() -> InlineKeyboardMarkup:
 def build_edit_menu_buttons() -> InlineKeyboardMarkup:
     """Build edit menu buttons"""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✏️ Title", callback_data="edit_title")],
-        [InlineKeyboardButton("📍 Location", callback_data="edit_location")],
+        [InlineKeyboardButton("✏️ Name", callback_data="edit_title")],
         [InlineKeyboardButton("🕐 Time", callback_data="edit_time")],
+        [InlineKeyboardButton("📍 Location", callback_data="edit_location")],
         [InlineKeyboardButton("❌ Cancel", callback_data="cancel_edit")]
     ])
 
@@ -3470,17 +3470,9 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await query.answer("")  # тихий ответ
         chat_id = query.message.chat_id
         
-        # Показываем меню редактирования
-        edit_keyboard = [
-            [InlineKeyboardButton("✏️ Edit Title", callback_data="edit_title")],
-            [InlineKeyboardButton("📍 Edit Location", callback_data="edit_location")],
-            [InlineKeyboardButton("🕐 Edit Time", callback_data="edit_time")],
-            [InlineKeyboardButton("❌ Cancel", callback_data="cancel_edit")]
-        ]
-        
         await query.edit_message_text(
             "What would you like to edit?",
-            reply_markup=InlineKeyboardMarkup(edit_keyboard)
+            reply_markup=build_edit_menu_buttons()
         )
         context.user_data['waiting_for'] = 'event_edit_choice'
         return
@@ -3715,14 +3707,11 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         if not event_data:
             await query.edit_message_text("❌ Event data not found. Please try again.")
             return
-        # Put the event back into the edit preview flow
+        # Go directly to time editing — skip the redundant preview step
         context.user_data['pending_event_preview'] = event_data
-        context.user_data['waiting_for'] = 'event_confirmation'
-        preview_text = format_event_preview(event_data)
+        context.user_data['waiting_for'] = 'edit_event_time'
         await query.edit_message_text(
-            preview_text,
-            parse_mode='HTML',
-            reply_markup=build_event_preview_buttons()
+            "🕐 Enter a new time for the event (e.g., 'Mon 21:00' or '14:30'):"
         )
         return
 
