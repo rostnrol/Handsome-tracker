@@ -110,10 +110,74 @@ def get_morning_time(chat_id: int) -> str:
 
 
 def get_evening_time(chat_id: int) -> str:
-    """Получает время вечерней сводки в формате HH:MM"""
+    """Получает время вечерней сводки в формате HH:ММ"""
     with get_db_connection() as con:
         cur = con.cursor()
         cur.execute("SELECT evening_time FROM settings WHERE chat_id=?", (chat_id,))
         row = cur.fetchone()
         return row[0] if row and row[0] else "21:00"
+
+
+def get_cleanup_info(chat_id: int):
+    """Returns (welcome_msg_id, last_morning_msg_id) or None if no record."""
+    with get_db_connection() as con:
+        cur = con.cursor()
+        cur.execute("SELECT welcome_msg_id, last_morning_msg_id FROM chat_cleanup WHERE chat_id=?", (chat_id,))
+        return cur.fetchone()
+
+
+def store_welcome_msg(chat_id: int, message_id: int) -> None:
+    """Store or update the welcome message ID for a chat."""
+    with get_db_connection() as con:
+        cur = con.cursor()
+        cur.execute("""
+            INSERT INTO chat_cleanup (chat_id, welcome_msg_id)
+            VALUES (?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET welcome_msg_id=excluded.welcome_msg_id
+        """, (chat_id, message_id))
+        con.commit()
+
+
+def add_uncertain_event(chat_id: int, event_name: str, reminder_utc: str) -> int:
+    """Store a new uncertain event. Returns the new row id."""
+    with get_db_connection() as con:
+        cur = con.cursor()
+        cur.execute(
+            "INSERT INTO uncertain_events (chat_id, event_name, reminder_utc, reminded, created_utc) VALUES (?, ?, ?, 0, ?)",
+            (chat_id, event_name, reminder_utc, datetime.now(timezone.utc).isoformat())
+        )
+        con.commit()
+        return cur.lastrowid
+
+
+def get_due_uncertain_events() -> list:
+    """Return list of (id, chat_id, event_name) for reminders whose time has come and haven't been sent."""
+    with get_db_connection() as con:
+        cur = con.cursor()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        cur.execute(
+            "SELECT id, chat_id, event_name FROM uncertain_events WHERE reminded=0 AND reminder_utc <= ?",
+            (now_iso,)
+        )
+        return cur.fetchall()
+
+
+def mark_uncertain_reminded(event_id: int) -> None:
+    """Mark an uncertain event reminder as sent."""
+    with get_db_connection() as con:
+        cur = con.cursor()
+        cur.execute("UPDATE uncertain_events SET reminded=1 WHERE id=?", (event_id,))
+        con.commit()
+
+
+def store_morning_msg(chat_id: int, message_id: int) -> None:
+    """Store or update the last morning briefing message ID for a chat."""
+    with get_db_connection() as con:
+        cur = con.cursor()
+        cur.execute("""
+            INSERT INTO chat_cleanup (chat_id, last_morning_msg_id)
+            VALUES (?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET last_morning_msg_id=excluded.last_morning_msg_id
+        """, (chat_id, message_id))
+        con.commit()
 

@@ -33,7 +33,7 @@ from telegram.ext import (
 from telegram.error import Conflict
 
 # Импорты сервисов
-from services.ai_service import parse_with_ai, transcribe_voice, extract_events_from_image
+from services.ai_service import parse_with_ai, transcribe_voice, extract_events_from_image, parse_reminder_time
 from services.calendar_service import (
     get_authorization_url,
     exchange_code_for_tokens,
@@ -49,7 +49,7 @@ from services.calendar_service import (
 from services.scheduler_service import get_today_events, get_events_for_date
 from services.analytics_service import track_event
 from services.scheduler_service import start_scheduler
-from services.db_service import get_google_tokens, save_google_tokens, delete_google_tokens
+from services.db_service import get_google_tokens, save_google_tokens, delete_google_tokens, store_welcome_msg, add_uncertain_event
 
 # ---- timezonefinder (pure Python) ----
 try:
@@ -264,8 +264,8 @@ async def _get_credentials_or_notify(chat_id: int, stored_tokens: dict, reply_fn
 def build_main_menu() -> ReplyKeyboardMarkup:
     """Создает главное меню на английском"""
     keyboard = [
-        [KeyboardButton("📋 Tasks for Today")],
-        [KeyboardButton("📆 Tasks for a Date")],
+        [KeyboardButton("📋 Tasks for Today"), KeyboardButton("📅 Tasks for Tomorrow")],
+        [KeyboardButton("📆 Tasks for a Date"), KeyboardButton("❓ Uncertain Event")],
         [KeyboardButton("📅 Open Google Calendar")],
         [KeyboardButton("⚙️ Settings")]
     ]
@@ -368,6 +368,27 @@ def init_db():
             client_secret TEXT,
             scopes TEXT,
             updated_utc TEXT NOT NULL
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chat_cleanup (
+            chat_id INTEGER PRIMARY KEY,
+            welcome_msg_id INTEGER,
+            last_morning_msg_id INTEGER
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS uncertain_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            event_name TEXT NOT NULL,
+            reminder_utc TEXT NOT NULL,
+            reminded INTEGER NOT NULL DEFAULT 0,
+            created_utc TEXT NOT NULL
         )
         """
     )
@@ -668,10 +689,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Voice messages\n"
         "• or even Photos of notes/schedules.\n\n"
         "You can add one or several events at a time.\n\n"
-        "You can even add a schedule of your regular meetings or classes.\n\n"
+        "You can even add a schedule of your regular activities.\n\n"
         "I will instantly add them to your <u>Google Calendar.</u>\n"
         "During the day you can <u>see</u> your tasks in a little app here and <u>mark</u> the completed ones, <u>reschedule</u>, or\n"
         "<u>cancel</u> those that are no longer relevant.\n\n"
+        "Not sure about the time of an event yet? Use <b>❓ Uncertain Event</b> — tell me the name and when to remind you, "
+        "and I'll nudge you at the right moment to get it scheduled.\n\n"
         "Every evening, I'll send you a <u>brief summary of your day,</u> and we'll reflect on\n"
         "• what can be transferred to the next day\n"
         "• and what can be forgotten.\n\n"
@@ -694,7 +717,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Send any text, voice message, or photo to create a task\n"
         "• When describing a task, specify both <b>start time</b> and (optionally) <b>duration</b> (e.g., <i>\"gym from 16:00 to 17:30\"</i>). If you don't specify duration, I'll ask how long the task takes.\n"
         "• <b>📋 Tasks for Today</b> — view and manage today's tasks\n"
+        "• <b>📅 Tasks for Tomorrow</b> — view tomorrow's tasks\n"
         "• <b>📆 Tasks for a Date</b> — view tasks for any date\n"
+        "• <b>❓ Uncertain Event</b> — not sure when an event will happen? Save its name and pick a reminder time — I'll ping you when it's time to schedule it\n"
         "• <b>📅 Open Google Calendar</b> — open your calendar\n"
         "• <b>⚙️ Settings</b> — change name, timezone, briefing times, and Google Calendar connection\n\n"
         "Task buttons:\n"
@@ -896,12 +921,15 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     text = update.message.text.strip()
     
     # Обработка команд меню (проверяем ПЕРЕД состоянием, чтобы пользователь мог отменить)
-    if text in ("⚙️ Settings", "📋 Tasks for Today", "📆 Tasks for a Date", "📅 Open Google Calendar"):
+    if text in ("⚙️ Settings", "📋 Tasks for Today", "📅 Tasks for Tomorrow", "📆 Tasks for a Date", "📅 Open Google Calendar", "❓ Uncertain Event"):
         # Очищаем все активные состояния при переходе в меню
+        await _clear_reschedule_prompt(context, chat_id)
         context.user_data.pop('state', None)
         context.user_data.pop('pending_schedule', None)
         context.user_data.pop('waiting_for', None)
         context.user_data.pop('rescheduling_event_id', None)
+        context.user_data.pop('reschedule_conflict_start', None)
+        context.user_data.pop('uncertain_event_name_pending', None)
 
     if text == "⚙️ Settings":
         
@@ -952,7 +980,11 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     if text == "📋 Tasks for Today":
         await show_daily_tasks(update, context)
         return
-    
+
+    if text == "📅 Tasks for Tomorrow":
+        await show_tasks_for_date(update, context, "tomorrow")
+        return
+
     if text == "📆 Tasks for a Date":
         context.user_data['waiting_for'] = 'tasks_date'
         await update.message.reply_text(
@@ -972,7 +1004,16 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             reply_markup=reply_markup
         )
         return
-    
+
+    if text == "❓ Uncertain Event":
+        context.user_data['waiting_for'] = 'uncertain_event_name'
+        await update.message.reply_text(
+            "❓ <b>Uncertain Event</b>\n\n"
+            "What is the name of the event you're not sure about yet?",
+            parse_mode='HTML'
+        )
+        return
+
     # Обработка ответа на вопрос о количестве недель для расписания
     if context.user_data.get('state') == 'WAITING_FOR_WEEKS':
         await handle_weeks_response(update, context, text)
@@ -983,10 +1024,54 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     if waiting_for == 'tasks_date':
         await show_tasks_for_date(update, context, text)
         return
-    
+
+    elif waiting_for == 'uncertain_event_name':
+        event_name = text.strip()
+        if not event_name:
+            await update.message.reply_text("Please enter a name for the event.")
+            return
+        context.user_data['uncertain_event_name_pending'] = event_name
+        context.user_data['waiting_for'] = 'uncertain_event_time'
+        await update.message.reply_text(
+            f"Got it — <b>{event_name}</b>.\n\n"
+            "When should I remind you to schedule it?\n"
+            "Examples: <i>tomorrow at 14:00</i>, <i>Monday 10:00</i>, <i>in 3 hours</i>",
+            parse_mode='HTML'
+        )
+        return
+
+    elif waiting_for == 'uncertain_event_time':
+        event_name = context.user_data.pop('uncertain_event_name_pending', None)
+        context.user_data.pop('waiting_for', None)
+        if not event_name:
+            await update.message.reply_text("❌ Something went wrong. Please tap ❓ Uncertain Event again.")
+            return
+        user_tz = get_user_timezone(chat_id) or DEFAULT_TZ
+        reminder_utc = await parse_reminder_time(text.strip(), user_tz)
+        if not reminder_utc:
+            await update.message.reply_text(
+                "❌ Couldn't understand that time. Please try again with a clearer format, "
+                "e.g. <i>tomorrow at 14:00</i> or <i>Monday 10:00</i>.",
+                parse_mode='HTML'
+            )
+            # Restore state so they can retry
+            context.user_data['uncertain_event_name_pending'] = event_name
+            context.user_data['waiting_for'] = 'uncertain_event_time'
+            return
+        reminder_dt_local = datetime.fromisoformat(reminder_utc).astimezone(pytz.timezone(user_tz))
+        reminder_str = reminder_dt_local.strftime('%a %d %b at %H:%M')
+        add_uncertain_event(chat_id, event_name, reminder_utc)
+        await update.message.reply_text(
+            f"✅ Got it! I'll remind you about <b>{event_name}</b> on <b>{reminder_str}</b>.\n\n"
+            "When the reminder comes, just send me the details and I'll add it to your calendar.",
+            parse_mode='HTML',
+            reply_markup=build_main_menu()
+        )
+        return
+
     elif waiting_for == 'name':
         # Проверяем, не является ли текст кнопкой из меню
-        if text.strip() and text not in ["📋 Tasks for Today", "📆 Tasks for a Date", "📅 Open Google Calendar", "⚙️ Settings"]:
+        if text.strip() and text not in ["📋 Tasks for Today", "📅 Tasks for Tomorrow", "📆 Tasks for a Date", "📅 Open Google Calendar", "⚙️ Settings", "❓ Uncertain Event"]:
             try:
                 validated_name = _validate_user_input(text, "Name", max_length=100)
                 set_user_name(chat_id, validated_name)
@@ -2038,34 +2123,49 @@ def format_event_preview(event_data: Dict[str, str]) -> str:
 def format_schedule_preview(events: List[Dict[str, str]]) -> str:
     """
     Форматирует рассписание для предпросмотра.
-    
+
     Args:
         events: Список событий из расписания
-    
+
     Returns:
         Форматированная строка со сводкой расписания
     """
     if not events:
         return "No events found"
-    
-    subject = events[0].get("summary", "Class")
-    location = events[0].get("location", "").strip()
-    
-    preview = f"📋 <b>{subject}</b>\n"
-    if location:
-        preview += f"📍 {location}\n"
-    
-    preview += f"\n📅 Weekly Schedule ({len(events)} classes):\n"
-    
-    for event in events[:5]:  # Показываем первые 5 событий
-        day = event.get("day_of_week", "Unknown")
-        start = event.get("start_time", "")
-        end = event.get("end_time", "")
-        preview += f"  • {day}: {start} - {end}\n"
-    
-    if len(events) > 5:
-        preview += f"  ... and {len(events) - 5} more\n"
-    
+
+    # Detect mixed-subject schedules (events with different summaries)
+    summaries = [e.get("summary", "").strip() for e in events]
+    is_mixed = len(set(summaries)) > 1
+
+    if is_mixed:
+        preview = f"📋 <b>Weekly Schedule</b> ({len(events)} events):\n\n"
+        for event in events[:10]:
+            day = event.get("day_of_week", "Unknown")
+            start = event.get("start_time", "")
+            end = event.get("end_time", "")
+            name = event.get("summary", "Event")
+            loc = event.get("location", "").strip()
+            line = f"  • {day}: {start}–{end} <b>{name}</b>"
+            if loc:
+                line += f" @ {loc}"
+            preview += line + "\n"
+        if len(events) > 10:
+            preview += f"  ... and {len(events) - 10} more\n"
+    else:
+        subject = summaries[0] or "Event"
+        location = events[0].get("location", "").strip()
+        preview = f"📋 <b>{subject}</b>\n"
+        if location:
+            preview += f"📍 {location}\n"
+        preview += f"\n📅 Weekly Schedule ({len(events)} events):\n"
+        for event in events[:5]:
+            day = event.get("day_of_week", "Unknown")
+            start = event.get("start_time", "")
+            end = event.get("end_time", "")
+            preview += f"  • {day}: {start} - {end}\n"
+        if len(events) > 5:
+            preview += f"  ... and {len(events) - 5} more\n"
+
     return preview
 
 
@@ -2149,7 +2249,7 @@ async def _process_photo_file(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not event_data:
             await update.message.reply_text(
                 "❌ Couldn't find any events in the image.\n\n"
-                "Make sure the photo clearly shows a schedule, timetable, or a task with a time.\n"
+                "Make sure the photo clearly shows a schedule or a task with a time.\n"
                 "You can also send the task as a text message.",
                 reply_markup=build_main_menu()
             )
@@ -2401,7 +2501,7 @@ async def handle_schedule_import(update: Update, context: ContextTypes.DEFAULT_T
     # Отправляем сообщение с вопросом о количестве недель
     cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="schedule_weeks_cancel")]])
     weeks_prompt_msg = await msg.reply_text(
-        f"👀 I see a weekly schedule with {len(events)} classes. For how many weeks should I add this to your calendar? (e.g., write '10' or '12'):",
+        f"👀 I see a weekly schedule with {len(events)} events. For how many weeks should I add this to your calendar? (e.g., write '10' or '12'):",
         reply_markup=cancel_kb
     )
     context.user_data['schedule_weeks_prompt_msg_id'] = weeks_prompt_msg.message_id
@@ -3124,7 +3224,7 @@ async def show_daily_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 label_text = f"{time_str} {summary}" if time_str else summary
                 keyboard.extend(_build_task_row(event_id, label_text))
         
-        reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+        reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else build_main_menu()
 
         await update.message.reply_text(
             message_text,
@@ -4622,12 +4722,13 @@ def main():
                 
                 # Отправляем уведомление пользователю в Telegram
                 try:
-                    await app.bot.send_message(
+                    welcome_msg = await app.bot.send_message(
                         chat_id=chat_id,
                         text="✅ Great! Your Google Calendar is connected.\n\n"
                              "Now you can send me tasks in any format and I'll add them to your calendar!",
                         reply_markup=build_main_menu()
                     )
+                    store_welcome_msg(chat_id, welcome_msg.message_id)
                     track_event(chat_id, "google_auth_success")
                 except Exception as e:
                     print(f"[Bot] Ошибка при отправке сообщения пользователю {chat_id}: {e}")

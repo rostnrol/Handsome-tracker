@@ -120,13 +120,13 @@ async def extract_events_from_image(image_path: str, user_timezone: str = "UTC")
             messages=[
                 {
                     "role": "system",
-                    "content": """You are an expert in OCR and parsing university timetables and schedules from images.
+                    "content": """You are an expert in OCR and parsing recurring schedules from images. The schedule can be anything: classes, workouts, chores, work shifts, routines, habits — any kind of repeating weekly activity.
 You must handle different languages (English, Russian, Italian, Spanish, etc.).
 Always respond with valid JSON.
 
 Analyze the image and determine if it shows:
 1. A SINGLE event/task - return single event format
-2. A RECURRING WEEKLY SCHEDULE (timetable) - return schedule format
+2. A RECURRING WEEKLY SCHEDULE (events repeated on specific days each week) - return schedule format
 
 IMPORTANT FOR ITALIAN SCHEDULES:
 - Look for patterns like "Ore 10:30", "Ore HH:MM", or "HH:MM - HH:MM"
@@ -146,7 +146,7 @@ For SINGLE EVENT, return:
     "location": "optional location - include all components (room, building, etc.) if present"
 }
 
-For RECURRING WEEKLY SCHEDULE (timetable with days of week), return:
+For RECURRING WEEKLY SCHEDULE (events on specific days of the week), return:
 {
     "is_recurring_schedule": true,
     "events": [
@@ -154,20 +154,21 @@ For RECURRING WEEKLY SCHEDULE (timetable with days of week), return:
             "day_of_week": "Wednesday",  // Always normalize to English full name: Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday
             "start_time": "12:15",       // HH:MM 24h format (local time)
             "end_time": "13:45",         // HH:MM 24h format (local time)
-            "summary": "Class/Event name",
-            "location": "Aula 4A, San Giobbe"  // IMPORTANT: Include ALL location components (room, building, etc.) combined in one field
+            "summary": "Event/activity name",
+            "location": "Room 4A, Building B"  // IMPORTANT: Include ALL location components combined in one field
         },
         ...
     ]
 }
 
 CRITICAL RULES:
-- If the image shows a weekly timetable/schedule with TWO OR MORE classes/events listed across different days, it's a recurring schedule. A single event shown on one day is NOT a recurring schedule.
+- If the image shows a weekly schedule with TWO OR MORE events/activities listed across different days, it's a recurring schedule. A single event shown on one day is NOT a recurring schedule.
 - Always normalize day names to English (e.g., "Lunedì" -> "Monday", "Martedì" -> "Tuesday")
 - Extract time in 24h format (e.g., "Ore 10:30" -> "10:30")
 - If you see a specific date (e.g., "16 febbraio"), use it for single events
 - For recurring schedules, ignore specific dates and use only day of week
-- **CRITICAL for location**: When extracting location from schedule entries, include ALL location components (room number, building name, campus) in one field, separated by ", " if needed. Example: "Aula 4A, San Giobbe" not just "San Giobbe"""
+- **CRITICAL for location**: When extracting location, include ALL location components (room number, building name, etc.) in one field, separated by ", " if needed.
+- **CRITICAL for mixed-activity schedules**: If the image shows multiple different activities (e.g., "Gym" on Monday, "Yoga" on Wednesday, "Swimming" on Friday), each event in the array must carry its own "summary" matching the activity shown for that slot. Do NOT use one activity's name for a different activity's slot."""
                 },
                 {
                     "role": "user",
@@ -342,8 +343,8 @@ async def parse_with_ai(text: str, user_timezone: str = "UTC", source_language: 
     system_prompt = """You are an assistant for parsing tasks and events from text.
 Your task is to extract information about the task and return STRICTLY valid JSON without additional characters.
 
-FIRST: Analyze if the text represents a **single task** OR a **recurring weekly schedule** (timetable).
-If it looks like a list of classes/events with Days of Week and Times (e.g., 'Mon 10:00 Math, Tue 12:00 History', 'Mercoledì 12:15 Aula 4A', weekly timetable), it is a recurring schedule.
+FIRST: Analyze if the text represents a **single task** OR a **recurring weekly schedule** (the same activity/activities repeated on specific days each week — could be anything: classes, workouts, chores, work shifts, routines, etc.).
+If it looks like a list of recurring activities with Days of Week and Times (e.g., 'Mon 10:00 Gym, Tue 12:00 Yoga', 'every Wednesday 14:00 standup', weekly routine), it is a recurring schedule.
 
 JSON structure for SINGLE TASK:
 {
@@ -366,7 +367,7 @@ JSON structure for RECURRING WEEKLY SCHEDULE:
             "day_of_week": "Wednesday",  // Always normalize to English full day name: Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday
             "start_time": "12:15",       // HH:MM 24h format (local time, not ISO)
             "end_time": "13:45",         // HH:MM 24h format (local time, not ISO)
-            "summary": "Class name or event title",
+            "summary": "Activity/event name",
             "location": "Aula 4A, San Giobbe"     // IMPORTANT: Include ALL location info (room number, building name, etc.) combined in single field. Separate parts with comma+space if needed. Can be empty string.
         },
         ...
@@ -374,13 +375,18 @@ JSON structure for RECURRING WEEKLY SCHEDULE:
 }
 
 CRITICAL RULES:
-1. DETECT RECURRING SCHEDULES: If text contains events listed across MULTIPLE different days of the week (e.g., "Monday 10:00 Math, Wednesday 14:00 History", "Mercoledì 12:15 Aula 4A, Giovedì 12:15 Aula 4A", "statistics\nMercoledì 12:15 - 13:45\nGiovedì 12:15 - 13:45"), set "is_recurring_schedule": true and return the events array. A SINGLE mention of a day of week with a time is NOT a recurring schedule — it is a single event (e.g., "Wednesday at 14:00 dentist" → single event on Wednesday). Only use recurring schedule when you see TWO OR MORE distinct day+time entries. Each event must have day_of_week (normalized to English), start_time and end_time in HH:MM format.
-1a. **CRITICAL for class schedules**: If the text STARTS with one or more lines that don't contain a day of week or time (these are the class/subject name lines), followed by schedule entries with days and times, extract the subject name from those initial lines and use it as the "summary" for ALL events in the schedule. Examples:
+1. DETECT RECURRING SCHEDULES: If text contains events listed across MULTIPLE different days of the week (e.g., "Monday 10:00 Math, Wednesday 14:00 History"), OR if the user uses words like "every [day]", "each [day]", "weekly on [day]" (even for a single day, because "every Monday" means it repeats weekly), set "is_recurring_schedule": true and return the events array. A mention of a day of week WITHOUT a recurrence keyword and with only one entry is a single event (e.g., "dentist Wednesday at 14:00" → single event). Each event must have day_of_week (normalized to English), start_time and end_time in HH:MM format.
+1a. **CRITICAL for single-activity schedules**: If the text STARTS with one or more lines that contain ONLY the activity/event name (no day of week or time), followed by schedule entries with days and times, extract the activity name from those initial lines and use it as the "summary" for ALL events in that schedule. Examples:
    - Input: "statistics\nMercoledì 12:15 - 13:45 Aula 4A" → all events get "summary": "statistics"
-   - Input: "Math - Advanced\nMonday 10:00 - 11:30, Wednesday 14:00 - 15:30" → all events get "summary": "Math - Advanced"
-   - Input: "Chemistry Lab\nLunedì 09:00 - 10:30, Mercoledì 09:00 - 10:30" → all events get "summary": "Chemistry Lab"
-   **IMPORTANT**: Always extract and use the first non-schedule line(s) as the subject name for recurring schedules. This is the most common format for class timetables.
+   - Input: "Morning Run\nMonday 07:00 - 07:30, Wednesday 07:00 - 07:30" → all events get "summary": "Morning Run"
+   - Input: "Team standup\nMon 10:00 - 10:30, Thu 10:00 - 10:30" → all events get "summary": "Team standup"
+   **Only apply this rule when ALL schedule entries belong to the same activity.** Do NOT apply this rule when different activities are named inline (see rule 1c).
 1b. **CRITICAL for location extraction**: When extracting location for each event, include ALL location components found (room/classroom number, building name, campus name, etc.). If text shows "Aula 4A San Giobbe", the location field must be "Aula 4A, San Giobbe" (combining room and building). Combine multiple location parts with ", " (comma+space). Never extract only the last location component - include everything.
+1c. **CRITICAL for mixed-subject schedules**: When a user specifies MULTIPLE different activities, each with their own days and times in a single message, treat each distinct activity as its own group of events with its own "summary". Each event in the array must use the summary of the activity it belongs to — do NOT apply one subject's name to another subject's events. Examples:
+   - Input: "philosophy lecture every monday and tuesday at 10:30 and math every wednesday at 11:00" → 3 events: [{day_of_week: "Monday", start_time: "10:30", end_time: "11:30", summary: "Philosophy Lecture"}, {day_of_week: "Tuesday", start_time: "10:30", end_time: "11:30", summary: "Philosophy Lecture"}, {day_of_week: "Wednesday", start_time: "11:00", end_time: "12:00", summary: "Math"}]
+   - Input: "yoga every monday at 7:00 and pilates every friday at 9:00" → [{day_of_week: "Monday", start_time: "07:00", end_time: "08:00", summary: "Yoga"}, {day_of_week: "Friday", start_time: "09:00", end_time: "10:00", summary: "Pilates"}]
+   - Input: "put gym on mon and wed at 18:00 and swimming on friday at 19:30" → 3 events with "Gym" for Mon/Wed and "Swimming" for Fri
+   **Also handle "every X and Y at Z"**: When a single activity is listed on multiple days at the same time (e.g., "philosophy every monday and tuesday at 10:30"), expand it into one event per day, all with the same summary.
 2. For SINGLE TASKS: If the message does NOT look like a task (e.g., "Hello", "How are you", "Thanks", greetings, casual conversation, random words, questions without action, random characters like "000000", meaningless text), set "is_task": false and return minimal valid JSON.
 3. If "is_task": false, you can set summary to empty string, but still provide valid ISO times (use today 09:00 as default).
 4. If user did NOT specify time explicitly (e.g., "Buy milk", "Call John"), set the task to TODAY at 09:00 (morning slot). Do NOT use tomorrow unless the user explicitly says "tomorrow", "next week", or similar future words.
@@ -802,4 +808,65 @@ async def generate_text_response(input_text: str, model: str = "gpt-4o-mini") ->
                 return response.choices[0].message.content.strip()
             except Exception as e2:
                 print(f"[AI Service] Ошибка при использовании fallback модели: {e2}")
+        return None
+
+
+async def parse_reminder_time(text: str, user_timezone: str = "UTC") -> Optional[str]:
+    """
+    Parses a natural-language reminder time and returns a UTC ISO 8601 datetime string.
+    E.g. "tomorrow at 14:00", "Monday 10:00", "in 2 hours" -> "2026-05-11T11:00:00+00:00"
+    Returns None on failure.
+    """
+    if not client:
+        return None
+
+    tz = pytz.timezone(user_timezone)
+    now_local = datetime.now(tz)
+    current_date = now_local.strftime('%Y-%m-%d')
+    current_time = now_local.strftime('%H:%M:%S')
+    utc_offset = now_local.strftime('%z')
+    utc_offset_fmt = (utc_offset[:3] + ':' + utc_offset[3:]) if len(utc_offset) == 5 else utc_offset
+
+    system_prompt = (
+        "You are a datetime parser. Extract the date and time from the user's text and return JSON "
+        "with a single field \"datetime\" in ISO 8601 format with the user's local timezone offset "
+        "(e.g., \"2026-05-12T14:00:00+03:00\").\n"
+        "Rules:\n"
+        "- \"tomorrow at HH:MM\" -> next calendar day at that time\n"
+        "- \"Monday at HH:MM\" / \"on Monday\" -> next upcoming Monday at that time "
+        "(or today if it IS Monday and the time hasn't passed yet)\n"
+        "- \"in X hours\" -> now + X hours\n"
+        "- If only a time is given (e.g. \"14:00\"), use today if not yet passed, otherwise tomorrow\n"
+        "- If only a day is given without a time, default to 09:00 on that day\n"
+        "Return ONLY valid JSON: {\"datetime\": \"YYYY-MM-DDTHH:MM:SS+HH:MM\"}"
+    )
+
+    user_prompt = (
+        f"Current date (local): {current_date}\n"
+        f"Current time (local): {current_time}\n"
+        f"UTC offset: {utc_offset_fmt}\n"
+        f"Timezone: {user_timezone}\n\n"
+        f"Parse this reminder time: {text}"
+    )
+
+    try:
+        response = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            response_format={"type": "json_object"}
+        )
+        content = response.choices[0].message.content.strip()
+        parsed = json.loads(content)
+        dt_str = parsed.get("datetime", "")
+        if not dt_str:
+            return None
+        dt = datetime.fromisoformat(dt_str)
+        if dt.tzinfo is None:
+            dt = tz.localize(dt)
+        return dt.astimezone(pytz.utc).isoformat()
+    except Exception as e:
+        print(f"[AI Service] Error parsing reminder time: {e}")
         return None

@@ -10,9 +10,8 @@ import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from services.ai_service import generate_morning_briefing_intro
 from services.calendar_service import get_credentials_from_stored
-from services.db_service import get_google_tokens, get_user_timezone, get_morning_time, get_evening_time
+from services.db_service import get_google_tokens, get_user_timezone, get_morning_time, get_evening_time, get_cleanup_info, store_morning_msg, get_due_uncertain_events, mark_uncertain_reminded
 from googleapiclient.discovery import build
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -133,10 +132,33 @@ def get_events_for_date(credentials, user_timezone: str, target_date) -> List[Di
         return []
 
 
+async def _cleanup_and_store(bot, chat_id: int, new_morning_msg_id: int):
+    """Delete all messages between the previous morning briefing and the new one, then record the new ID."""
+    try:
+        cleanup_info = get_cleanup_info(chat_id)
+        if cleanup_info:
+            welcome_id, prev_morning_id = cleanup_info
+            if prev_morning_id and new_morning_msg_id > prev_morning_id + 1:
+                ids_to_delete = [
+                    i for i in range(prev_morning_id + 1, new_morning_msg_id)
+                    if i != welcome_id
+                ]
+                # Delete in batches of 100 (Telegram limit)
+                for i in range(0, len(ids_to_delete), 100):
+                    batch = ids_to_delete[i:i + 100]
+                    try:
+                        await bot.delete_messages(chat_id=chat_id, message_ids=batch)
+                    except Exception:
+                        pass
+        store_morning_msg(chat_id, new_morning_msg_id)
+    except Exception as e:
+        print(f"[Scheduler Service] Cleanup error for chat_id={chat_id}: {e}")
+
+
 async def send_morning_briefing(bot, chat_id: int, user_timezone: str):
     """
     Отправляет утренний брифинг пользователю.
-    
+
     Args:
         bot: Telegram Bot instance
         chat_id: ID чата пользователя
@@ -177,15 +199,13 @@ async def send_morning_briefing(bot, chat_id: int, user_timezone: str):
         
         # Если нет задач, отправляем специальное сообщение
         if not events:
-            await bot.send_message(
+            msg = await bot.send_message(
                 chat_id=chat_id,
                 text="No tasks for today yet. Enjoy your freedom!"
             )
+            await _cleanup_and_store(bot, chat_id, msg.message_id)
             return
-        
-        # Генерируем только вступление через AI
-        intro = await generate_morning_briefing_intro()
-        
+
         # Форматируем список задач (Time - Title)
         tz = pytz.timezone(user_timezone)
         tasks_list = []
@@ -195,7 +215,7 @@ async def send_morning_briefing(bot, chat_id: int, user_timezone: str):
                 continue  # skip cancelled tasks
             if summary.startswith('✅ '):
                 summary = summary[2:]
-            
+
             start_time = event.get('start_time', '')
             time_str = ""
             if start_time:
@@ -207,27 +227,28 @@ async def send_morning_briefing(bot, chat_id: int, user_timezone: str):
                             time_str = dt.strftime('%H:%M')
                 except Exception:
                     pass
-            
+
             if time_str:
                 tasks_list.append(f"{time_str} {summary}")
             else:
                 tasks_list.append(summary)
-        
+
         # If all events were cancelled/hidden, treat as no tasks
         if not tasks_list:
-            await bot.send_message(
+            msg = await bot.send_message(
                 chat_id=chat_id,
                 text="No tasks for today yet. Enjoy your freedom!"
             )
+            await _cleanup_and_store(bot, chat_id, msg.message_id)
             return
 
-        # Объединяем вступление и список задач
-        briefing = f"{intro}\n\n" + "\n".join(tasks_list)
-        
-        await bot.send_message(
+        briefing = "📅 Here's your task list for today:\n\n" + "\n".join(tasks_list)
+
+        msg = await bot.send_message(
             chat_id=chat_id,
             text=briefing
         )
+        await _cleanup_and_store(bot, chat_id, msg.message_id)
     except Exception as e:
         print(f"[Scheduler Service] Ошибка при отправке утреннего брифинга: {e}")
         try:
@@ -469,6 +490,32 @@ async def check_and_send_briefings(bot):
                 
     except Exception as e:
         print(f"[Scheduler Service] Ошибка при проверке сводок: {e}")
+
+    # Check uncertain event reminders (independent of per-user loop)
+    await _check_uncertain_reminders(bot)
+
+
+async def _check_uncertain_reminders(bot):
+    """Send reminders for uncertain events whose time has come."""
+    try:
+        due = get_due_uncertain_events()
+        for event_id, chat_id, event_name in due:
+            try:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        f"⏰ Reminder: you haven't scheduled <b>{event_name}</b> yet.\n\n"
+                        "Have you figured out the date and time? "
+                        "If yes, just send me the details and I'll add it to your calendar!"
+                    ),
+                    parse_mode='HTML'
+                )
+                mark_uncertain_reminded(event_id)
+                print(f"[Scheduler] Sent uncertain reminder for '{event_name}' to {chat_id}")
+            except Exception as e:
+                print(f"[Scheduler] Error sending uncertain reminder to {chat_id}: {e}")
+    except Exception as e:
+        print(f"[Scheduler] Error checking uncertain reminders: {e}")
 
 
 def start_scheduler(bot):
