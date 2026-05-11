@@ -50,6 +50,7 @@ from services.scheduler_service import get_today_events, get_events_for_date
 from services.analytics_service import track_event
 from services.scheduler_service import start_scheduler
 from services.db_service import get_google_tokens, save_google_tokens, delete_google_tokens, store_welcome_msg, add_uncertain_event
+from services.persistence_service import SqlitePersistence
 
 # ---- timezonefinder (pure Python) ----
 try:
@@ -389,6 +390,14 @@ def init_db():
             reminder_utc TEXT NOT NULL,
             reminded INTEGER NOT NULL DEFAULT 0,
             created_utc TEXT NOT NULL
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS bot_persistence (
+            key TEXT PRIMARY KEY,
+            data TEXT NOT NULL
         )
         """
     )
@@ -861,7 +870,7 @@ async def finish_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not redirect_uri:
         base_url = os.getenv("BASE_URL")
         if not base_url:
-            port = int(os.getenv("PORT", 8000))
+            port = int(os.getenv("PORT", 10000))
             base_url = f"http://localhost:{port}"
         redirect_uri = f"{base_url}/google/callback"
     
@@ -3465,7 +3474,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         if not redirect_uri:
             base_url = os.getenv("BASE_URL")
             if not base_url:
-                port = int(os.getenv("PORT", 8000))
+                port = int(os.getenv("PORT", 10000))
                 base_url = f"http://localhost:{port}"
             redirect_uri = f"{base_url}/google/callback"
 
@@ -4485,7 +4494,7 @@ async def create_calendar_event(update: Update, context: ContextTypes.DEFAULT_TY
         if not redirect_uri:
             base_url = os.getenv("BASE_URL")
             if not base_url:
-                port = int(os.getenv("PORT", 8000))
+                port = int(os.getenv("PORT", 10000))
                 base_url = f"http://localhost:{port}"
             redirect_uri = f"{base_url}/google/callback"
 
@@ -4607,6 +4616,32 @@ async def set_commands(app: Application):
 
 # ----------------- Main -----------------
 
+async def _run_bot_webhook(app: Application, http_app, port: int, base_url: str, token: str, render_url: str):
+    """Webhook mode: initialize app, set Telegram webhook, run aiohttp server forever."""
+    await app.initialize()
+    await set_commands(app)
+    start_scheduler(app.bot)
+
+    runner = web.AppRunner(http_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"[HTTP] Listening on port {port}")
+    print(f"[HTTP] Google OAuth callback: {base_url}/google/callback")
+
+    webhook_url = f"{render_url}/{token}"
+    await app.bot.set_webhook(url=webhook_url, drop_pending_updates=True)
+    print(f"[webhook] Webhook set to {webhook_url}")
+
+    await app.start()
+    try:
+        await asyncio.Event().wait()  # run forever until process is killed
+    finally:
+        await app.stop()
+        await runner.cleanup()
+        await app.shutdown()
+
+
 def main():
     init_db()
 
@@ -4669,15 +4704,15 @@ def main():
         raise RuntimeError("Set BOT_TOKEN env variable")
 
     # Запускаем HTTP сервер для Render (health check и Google OAuth callback)
-    port = int(os.getenv("PORT", 8000))
-    base_url = os.getenv("BASE_URL")
-    if not base_url:
-        base_url = f"http://localhost:{port}"
-    
+    port = int(os.getenv("PORT", 10000))
+    render_url = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
+    base_url = os.getenv("BASE_URL") or render_url or f"http://localhost:{port}"
+
     # Создаем bot application ПЕРЕД определением google_callback, чтобы он был доступен в замыкании
     app: Application = (
         ApplicationBuilder()
         .token(token)
+        .persistence(SqlitePersistence())
         .build()
     )
 
@@ -4796,33 +4831,22 @@ def main():
                 status=500
             )
     
+    # Telegram webhook handler — receives updates from Telegram and queues them
+    async def telegram_webhook(request):
+        try:
+            data = await request.json()
+            update = Update.de_json(data, app.bot)
+            await app.update_queue.put(update)
+        except Exception as e:
+            print(f"[webhook] Error processing update: {e}")
+        return web.Response(text="OK")
+
     # Создаем aiohttp приложение
     http_app = web.Application()
     http_app.router.add_get("/", health_check)
     http_app.router.add_get("/health", health_check)
     http_app.router.add_get("/google/callback", google_callback)
-    
-    # Запускаем HTTP сервер в фоне
-    async def start_http_server():
-        """Запускает HTTP сервер на указанном порту"""
-        runner = web.AppRunner(http_app)
-        await runner.setup()
-        site = web.TCPSite(runner, "0.0.0.0", port)
-        await site.start()
-        print(f"[HTTP Server] Started on port {port}")
-        print(f"[HTTP Server] Callback URL: {base_url}/google/callback")
-    
-    async def _post_init(app_instance):
-        await app_instance.bot.delete_webhook(drop_pending_updates=True)
-        await set_commands(app_instance)
-        # Запускаем scheduler после инициализации бота
-        start_scheduler(app_instance.bot)
-        # Запускаем HTTP сервер в фоне через asyncio
-        loop = asyncio.get_event_loop()
-        loop.create_task(start_http_server())
-    
-    # Регистрируем post_init callback
-    app.post_init = _post_init
+    http_app.router.add_post(f"/{token}", telegram_webhook)
 
     # Регистрируем хендлеры
     app.add_handler(CommandHandler("start", start))
@@ -4834,17 +4858,39 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
     app.add_handler(CallbackQueryHandler(handle_callback_query))
 
-    while True:
-        try:
-            app.run_polling(close_loop=False)
-            break
-        except Conflict as e:
-            print(
-                "[polling] Conflict detected (another getUpdates request is active). "
-                "Retrying in 5 seconds...",
-                str(e),
-            )
-            time_module.sleep(5)
+    if render_url:
+        # Production: webhook mode — everything runs in one asyncio loop
+        asyncio.run(_run_bot_webhook(app, http_app, port, base_url, token, render_url))
+    else:
+        # Local development: polling mode — start aiohttp server as a background task
+        async def _post_init(app_instance):
+            await app_instance.bot.delete_webhook(drop_pending_updates=True)
+            await set_commands(app_instance)
+            start_scheduler(app_instance.bot)
+            loop = asyncio.get_event_loop()
+
+            async def _start_http():
+                runner = web.AppRunner(http_app)
+                await runner.setup()
+                site = web.TCPSite(runner, "0.0.0.0", port)
+                await site.start()
+                print(f"[HTTP] Listening on port {port} (polling mode)")
+
+            loop.create_task(_start_http())
+
+        app.post_init = _post_init
+
+        while True:
+            try:
+                app.run_polling(close_loop=False)
+                break
+            except Conflict as e:
+                print(
+                    "[polling] Conflict detected (another getUpdates request is active). "
+                    "Retrying in 5 seconds...",
+                    str(e),
+                )
+                time_module.sleep(5)
 
 
 if __name__ == "__main__":
