@@ -340,7 +340,7 @@ async def parse_with_ai(text: str, user_timezone: str = "UTC", source_language: 
     else:
         utc_offset_fmt = utc_offset
     
-    system_prompt = """You are an assistant for parsing tasks and events from text.
+    system_prompt = """You are an expert assistant for parsing tasks and events from text.
 Your task is to extract information about the task and return STRICTLY valid JSON without additional characters.
 
 FIRST: Analyze if the text represents a **single task** OR a **recurring weekly schedule** (the same activity/activities repeated on specific days each week — could be anything: classes, workouts, chores, work shifts, routines, etc.).
@@ -427,16 +427,16 @@ Return JSON with task information."""
 
     try:
         response = await client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4o",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
             response_format={"type": "json_object"}
         )
-        
+
         content = response.choices[0].message.content.strip()
-        
+
         # Убираем markdown форматирование если есть
         if content.startswith("```json"):
             content = content[7:]

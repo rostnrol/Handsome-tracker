@@ -939,6 +939,10 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         context.user_data.pop('rescheduling_event_id', None)
         context.user_data.pop('reschedule_conflict_start', None)
         context.user_data.pop('uncertain_event_name_pending', None)
+        context.user_data.pop('uncertain_event_pending', None)
+        context.user_data.pop('uncertain_name_prompt_msg_id', None)
+        context.user_data.pop('uncertain_time_prompt_msg_id', None)
+        context.user_data.pop('duration_prompt_msg_id', None)
 
     if text == "⚙️ Settings":
         
@@ -1016,11 +1020,12 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if text == "❓ Uncertain Event":
         context.user_data['waiting_for'] = 'uncertain_event_name'
-        await update.message.reply_text(
+        name_prompt = await update.message.reply_text(
             "❓ <b>Uncertain Event</b>\n\n"
             "What is the name of the event you're not sure about yet?",
             parse_mode='HTML'
         )
+        context.user_data['uncertain_name_prompt_msg_id'] = name_prompt.message_id
         return
 
     # Обработка ответа на вопрос о количестве недель для расписания
@@ -1041,12 +1046,13 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
         context.user_data['uncertain_event_name_pending'] = event_name
         context.user_data['waiting_for'] = 'uncertain_event_time'
-        await update.message.reply_text(
+        time_prompt = await update.message.reply_text(
             f"Got it — <b>{event_name}</b>.\n\n"
             "When should I remind you to schedule it?\n"
             "Examples: <i>tomorrow at 14:00</i>, <i>Monday 10:00</i>, <i>in 3 hours</i>",
             parse_mode='HTML'
         )
+        context.user_data['uncertain_time_prompt_msg_id'] = time_prompt.message_id
         return
 
     elif waiting_for == 'uncertain_event_time':
@@ -1070,12 +1076,33 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         reminder_dt_local = datetime.fromisoformat(reminder_utc).astimezone(pytz.timezone(user_tz))
         reminder_str = reminder_dt_local.strftime('%a %d %b at %H:%M')
         add_uncertain_event(chat_id, event_name, reminder_utc)
+
+        # Delete the setup prompt messages, leaving only the final confirmation
+        for msg_key in ('uncertain_name_prompt_msg_id', 'uncertain_time_prompt_msg_id'):
+            msg_id = context.user_data.pop(msg_key, None)
+            if msg_id:
+                try:
+                    await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+                except Exception:
+                    pass
+
         await update.message.reply_text(
             f"✅ Got it! I'll remind you about <b>{event_name}</b> on <b>{reminder_str}</b>.\n\n"
             "When the reminder comes, just send me the details and I'll add it to your calendar.",
             parse_mode='HTML',
             reply_markup=build_main_menu()
         )
+        return
+
+    elif waiting_for == 'uncertain_event_schedule':
+        # User is responding to an uncertain-event reminder — treat their message as
+        # scheduling details, prepending the event name if it's not already in the text.
+        event_name = context.user_data.pop('uncertain_event_pending', '')
+        context.user_data.pop('waiting_for', None)
+        task_text = text.strip()
+        if event_name and event_name.lower() not in task_text.lower():
+            task_text = f"{event_name} {task_text}"
+        await process_task(update, context, text=task_text, source="text")
         return
 
     elif waiting_for == 'name':
@@ -1615,6 +1642,14 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             context.user_data.pop('waiting_for', None)
             context.user_data.pop('pending_event_data', None)
             context.user_data.pop('pending_event_source', None)
+
+            # Delete the "Please specify duration" prompt message
+            dur_msg_id = context.user_data.pop('duration_prompt_msg_id', None)
+            if dur_msg_id:
+                try:
+                    await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=dur_msg_id)
+                except Exception:
+                    pass
 
             await show_event_preview(update, context, pending_event, source=pending_source)
         except Exception:
@@ -3115,12 +3150,13 @@ async def process_task(update: Update, context: ContextTypes.DEFAULT_TYPE, text:
                 context.user_data['pending_event_source'] = source
 
                 cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="cancel_task_duration")]])
-                await update.message.reply_text(
+                dur_msg = await update.message.reply_text(
                     "⏱ Please specify how long this task will take.\n\n"
                     "Examples: <b>30</b>, <b>30 min</b>, <b>1h</b>, <b>1:30</b>",
                     parse_mode='HTML',
                     reply_markup=cancel_kb
                 )
+                context.user_data['duration_prompt_msg_id'] = dur_msg.message_id
                 return
         else:
             # Duration was explicitly specified - just show preview
@@ -3560,19 +3596,20 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             await query.edit_message_text("❌ Event data not found. Please try again.")
             return
 
-        # Remove preview buttons immediately so user can't double-tap
-        try:
-            await query.edit_message_reply_markup(reply_markup=None)
-        except Exception:
-            pass
-
         # Очищаем состояние
         context.user_data.pop('pending_event_preview', None)
         context.user_data.pop('pending_event_source', None)
         context.user_data.pop('waiting_for', None)
 
+        preview_msg_id = query.message.message_id
         await create_calendar_event(update, context, event_data, source=source)
         track_event(chat_id, "event_preview_confirmed", {"source": source})
+
+        # Delete the event preview message now that confirmation is shown
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=preview_msg_id)
+        except Exception:
+            pass
         return
 
     elif callback_data == "event_edit":
@@ -3811,13 +3848,80 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     elif callback_data == "conflict_change_time":
         await query.answer("")
         event_data = context.user_data.pop('pending_conflict_event', None)
-        context.user_data.pop('pending_conflict_source', None)
+        source = context.user_data.pop('pending_conflict_source', 'unknown')
         context.user_data.pop('pending_conflict_ids', None)
         if not event_data:
             await query.edit_message_text("❌ Event data not found. Please try again.")
             return
-        # Go directly to time editing — skip the redundant preview step
+
         context.user_data['pending_event_preview'] = event_data
+        context.user_data['pending_event_source'] = source
+
+        # Try to find the next free slot automatically
+        suggested_start = None
+        stored_tokens = get_google_tokens(chat_id)
+        if stored_tokens:
+            creds = await _get_credentials_or_notify(
+                chat_id, stored_tokens,
+                lambda t: query.edit_message_text(t)
+            )
+            if not creds:
+                return  # auth error already shown; don't overwrite with manual prompt
+            try:
+                start_dt = datetime.fromisoformat(event_data["start_time"].replace("Z", "+00:00"))
+                if start_dt.tzinfo is None:
+                    start_dt = pytz.utc.localize(start_dt)
+                duration_min = event_data.get("duration_minutes", 30)
+                suggested_start = await asyncio.to_thread(
+                    find_next_free_slot, creds, start_dt, duration_min
+                )
+            except Exception as e:
+                print(f"[Bot] Error finding next free slot: {e}")
+
+        if suggested_start:
+            user_tz_str = get_user_timezone(chat_id) or DEFAULT_TZ
+            user_tz = pytz.timezone(user_tz_str)
+            slot_local = suggested_start.astimezone(user_tz)
+            duration_min = event_data.get("duration_minutes", 30)
+            slot_end_local = slot_local + timedelta(minutes=duration_min)
+            slot_label = f"{slot_local.strftime('%a %d %b')} at {slot_local.strftime('%H:%M')}–{slot_end_local.strftime('%H:%M')}"
+            context.user_data['conflict_suggested_start'] = suggested_start.isoformat()
+            markup = InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"✅ {slot_label}", callback_data="conflict_use_slot")],
+                [InlineKeyboardButton("✏️ Enter a different time", callback_data="conflict_manual_time")],
+            ])
+            await query.edit_message_text(
+                f"Next free slot: <b>{slot_label}</b>\n\nUse this time?",
+                parse_mode='HTML',
+                reply_markup=markup
+            )
+        else:
+            context.user_data['waiting_for'] = 'edit_event_time'
+            await query.edit_message_text(
+                "🕐 Enter a new time for the event (e.g., 'Mon 21:00' or '14:30'):"
+            )
+        return
+
+    elif callback_data == "conflict_use_slot":
+        await query.answer("")
+        event_data = context.user_data.pop('pending_event_preview', None)
+        source = context.user_data.pop('pending_event_source', 'unknown')
+        suggested_iso = context.user_data.pop('conflict_suggested_start', None)
+        if not event_data or not suggested_iso:
+            await query.edit_message_text("❌ Event data not found. Please try again.")
+            return
+        suggested_start = datetime.fromisoformat(suggested_iso)
+        duration_min = event_data.get("duration_minutes", 30)
+        updated_event = dict(event_data)
+        updated_event['start_time'] = suggested_start.isoformat()
+        updated_event['end_time'] = (suggested_start + timedelta(minutes=duration_min)).isoformat()
+        await query.edit_message_text("⏳ Creating event...")
+        await create_calendar_event(update, context, updated_event, source)
+        return
+
+    elif callback_data == "conflict_manual_time":
+        await query.answer("")
+        context.user_data.pop('conflict_suggested_start', None)
         context.user_data['waiting_for'] = 'edit_event_time'
         await query.edit_message_text(
             "🕐 Enter a new time for the event (e.g., 'Mon 21:00' or '14:30'):"
@@ -3838,6 +3942,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data.pop('waiting_for', None)
         context.user_data.pop('pending_event_data', None)
         context.user_data.pop('pending_event_source', None)
+        context.user_data.pop('duration_prompt_msg_id', None)
         await query.edit_message_text("❌ Task creation cancelled.")
         await query.message.reply_text("What would you like to do next?", reply_markup=build_main_menu())
         return
@@ -4198,6 +4303,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
         context.user_data['rescheduling_event_id'] = event_id
         context.user_data['waiting_for'] = 'reschedule_time'
+        context.user_data.pop('reschedule_conflict_start', None)
 
         cancel_keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("❌ Cancel reschedule", callback_data=f"cancel_reschedule_{event_id}")]
@@ -4217,6 +4323,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
         context.user_data['rescheduling_event_id'] = event_id
         context.user_data['waiting_for'] = 'reschedule_time'
+        context.user_data.pop('reschedule_conflict_start', None)
 
         cancel_keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("❌ Cancel reschedule", callback_data=f"cancel_reschedule_{event_id}")]
@@ -4620,7 +4727,7 @@ async def _run_bot_webhook(app: Application, http_app, port: int, base_url: str,
     """Webhook mode: initialize app, set Telegram webhook, run aiohttp server forever."""
     await app.initialize()
     await set_commands(app)
-    start_scheduler(app.bot)
+    start_scheduler(app)
 
     runner = web.AppRunner(http_app)
     await runner.setup()
@@ -4866,7 +4973,7 @@ def main():
         async def _post_init(app_instance):
             await app_instance.bot.delete_webhook(drop_pending_updates=True)
             await set_commands(app_instance)
-            start_scheduler(app_instance.bot)
+            start_scheduler(app_instance)
             loop = asyncio.get_event_loop()
 
             async def _start_http():

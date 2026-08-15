@@ -442,61 +442,63 @@ async def generate_evening_recap(events: list, user_timezone: str) -> str:
         return f"Good evening! 🌙\n\nToday you had {len(events)} event(s):\n{events_text}\n\nLet's reflect on what can be transferred to tomorrow and what can be forgotten."
 
 
-async def check_and_send_briefings(bot):
+async def check_and_send_briefings(app):
     """
     Проверяет всех пользователей и отправляет сводки, если наступило их время.
     Запускается каждую минуту через cron job, чтобы поддерживать любые времена
     (например, 09:30, 21:45), а не только :00 минут.
     """
+    bot = app.bot
     from services.db_service import get_con
-    
+
     try:
         con = get_con()
         cur = con.cursor()
         # Получаем всех пользователей, которые прошли онбординг
         cur.execute("""
-            SELECT chat_id, tz, morning_time, evening_time 
-            FROM settings 
+            SELECT chat_id, tz, morning_time, evening_time
+            FROM settings
             WHERE onboard_done = 1 AND tz IS NOT NULL
         """)
         users = cur.fetchall()
         con.close()
-        
+
         now_utc = datetime.now(pytz.utc)
-        
+
         for chat_id, tz_str, morning_time, evening_time in users:
             if not tz_str:
                 continue
-            
+
             try:
                 # Получаем локальное время пользователя
                 user_tz = pytz.timezone(tz_str)
                 now_local = now_utc.astimezone(user_tz)
                 current_time_str = now_local.strftime("%H:%M")
-                
+
                 # Проверяем, нужно ли отправить утреннюю сводку
                 if morning_time and current_time_str == morning_time:
                     print(f"[Scheduler] Sending morning briefing to {chat_id} at {current_time_str} ({tz_str})")
                     await send_morning_briefing(bot, chat_id, tz_str)
-                
+
                 # Проверяем, нужно ли отправить вечернюю сводку
                 if evening_time and current_time_str == evening_time:
                     print(f"[Scheduler] Sending evening recap to {chat_id} at {current_time_str} ({tz_str})")
                     await send_evening_recap(bot, chat_id, tz_str)
-                    
+
             except Exception as e:
                 print(f"[Scheduler Service] Ошибка при обработке пользователя {chat_id}: {e}")
                 continue
-                
+
     except Exception as e:
         print(f"[Scheduler Service] Ошибка при проверке сводок: {e}")
 
     # Check uncertain event reminders (independent of per-user loop)
-    await _check_uncertain_reminders(bot)
+    await _check_uncertain_reminders(app)
 
 
-async def _check_uncertain_reminders(bot):
+async def _check_uncertain_reminders(app):
     """Send reminders for uncertain events whose time has come."""
+    bot = app.bot
     try:
         due = get_due_uncertain_events()
         for event_id, chat_id, event_name in due:
@@ -511,6 +513,10 @@ async def _check_uncertain_reminders(bot):
                     parse_mode='HTML'
                 )
                 mark_uncertain_reminded(event_id)
+                # Set user_data so the next message from this user is treated as
+                # scheduling details for this specific event.
+                app.user_data[chat_id]['waiting_for'] = 'uncertain_event_schedule'
+                app.user_data[chat_id]['uncertain_event_pending'] = event_name
                 print(f"[Scheduler] Sent uncertain reminder for '{event_name}' to {chat_id}")
             except Exception as e:
                 print(f"[Scheduler] Error sending uncertain reminder to {chat_id}: {e}")
@@ -518,21 +524,21 @@ async def _check_uncertain_reminders(bot):
         print(f"[Scheduler] Error checking uncertain reminders: {e}")
 
 
-def start_scheduler(bot):
+def start_scheduler(app):
     """
     Запускает scheduler с cron job, который проверяет пользователей каждую минуту.
     Это необходимо, чтобы отправлять сводки в любое время, указанное пользователем
     (например, 09:30, 21:45), а не только в :00 минут.
-    
+
     Args:
-        bot: Telegram Bot instance
+        app: telegram.ext.Application instance
     """
     if not scheduler.running:
         # Запускаем cron job каждую минуту для проверки всех пользователей
         scheduler.add_job(
             check_and_send_briefings,
             trigger=CronTrigger(minute="*"),  # Каждую минуту
-            args=[bot],
+            args=[app],
             id="minute_briefings_check",
             replace_existing=True
         )
