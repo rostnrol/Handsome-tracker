@@ -22,7 +22,10 @@ logger = logging.getLogger(__name__)
 
 
 # Конфигурация OAuth2
-SCOPES = ['https://www.googleapis.com/auth/calendar.events']
+SCOPES = [
+    'https://www.googleapis.com/auth/calendar.events',
+    'https://www.googleapis.com/auth/calendar.readonly',
+]
 # REDIRECT_URI теперь формируется динамически на основе базового URL сервера
 
 
@@ -50,7 +53,7 @@ def get_authorization_url(user_id: int, redirect_uri: str) -> str:
         "client_id": client_id,
         "redirect_uri": redirect_uri,
         "response_type": "code",
-        "scope": "https://www.googleapis.com/auth/calendar.events",
+        "scope": " ".join(SCOPES),
         "access_type": "offline",
         "prompt": "consent",
         "state": str(user_id)  # Сохраняем user_id в state для безопасности
@@ -272,9 +275,28 @@ def create_event(credentials: Credentials, event_data: Dict[str, str]) -> Option
         location = event_data.get("location", "")
         if location:
             event['location'] = location
-        
-        # Создаем событие
-        created_event = service.events().insert(calendarId='primary', body=event).execute()
+
+        # Attendees (meeting invites)
+        attendees = event_data.get("attendees", [])
+        if attendees:
+            event['attendees'] = [{'email': email} for email in attendees]
+
+        # Google Meet link
+        with_meet = event_data.get("with_meet", False)
+        if with_meet:
+            import uuid as _uuid
+            event['conferenceData'] = {
+                'createRequest': {
+                    'requestId': str(_uuid.uuid4()),
+                    'conferenceSolutionKey': {'type': 'hangoutsMeet'},
+                }
+            }
+
+        # Создаем событие (conferenceDataVersion=1 required for Meet)
+        insert_kwargs = {'calendarId': 'primary', 'body': event}
+        if with_meet:
+            insert_kwargs['conferenceDataVersion'] = 1
+        created_event = service.events().insert(**insert_kwargs).execute()
         
         # Возвращаем HTML ссылку на событие
         return created_event.get('htmlLink')
@@ -604,4 +626,63 @@ def get_calendar_timezone(credentials: Credentials) -> Optional[str]:
     except Exception as e:
         logger.error(f"[Calendar Service] Failed to fetch calendar timezone: {e}")
         return None
+
+
+def get_subscribed_people(credentials: Credentials) -> list:
+    """Returns [{name, email}] for people whose calendars you are subscribed to.
+
+    Requires calendar.readonly scope. Returns empty list on permission error (graceful degradation).
+    """
+    try:
+        service = build('calendar', 'v3', credentials=credentials)
+        items = service.calendarList().list().execute().get('items', [])
+        people = []
+        for item in items:
+            cal_id = item.get('id', '')
+            summary = item.get('summary', '').strip()
+            # Person calendars: email-format IDs, not primary, not holiday/group calendars
+            if ('@' in cal_id
+                    and not item.get('primary')
+                    and '#' not in cal_id
+                    and summary):
+                people.append({'name': summary, 'email': cal_id})
+        logger.info(f"[Calendar Service] Found {len(people)} subscribed people")
+        return people
+    except HttpError as e:
+        logger.warning(f"[Calendar Service] calendarList.list failed (scope may be insufficient): {e}")
+        return []
+    except Exception as e:
+        logger.error(f"[Calendar Service] get_subscribed_people error: {e}")
+        return []
+
+
+def check_attendees_busy(credentials: Credentials, emails: list, start_dt: datetime, end_dt: datetime) -> list:
+    """Returns list of emails that are busy during [start_dt, end_dt].
+
+    Requires calendar.readonly scope. Returns empty list on permission error (graceful degradation).
+    """
+    try:
+        if not emails:
+            return []
+        if start_dt.tzinfo is None:
+            start_dt = pytz.utc.localize(start_dt)
+        if end_dt.tzinfo is None:
+            end_dt = pytz.utc.localize(end_dt)
+
+        service = build('calendar', 'v3', credentials=credentials)
+        body = {
+            "timeMin": start_dt.astimezone(pytz.utc).isoformat(),
+            "timeMax": end_dt.astimezone(pytz.utc).isoformat(),
+            "items": [{"id": email} for email in emails],
+        }
+        result = service.freebusy().query(body=body).execute()
+        calendars = result.get('calendars', {})
+        busy = [email for email, info in calendars.items() if info.get('busy')]
+        return busy
+    except HttpError as e:
+        logger.warning(f"[Calendar Service] freebusy.query failed (scope may be insufficient): {e}")
+        return []
+    except Exception as e:
+        logger.error(f"[Calendar Service] check_attendees_busy error: {e}")
+        return []
 

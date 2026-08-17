@@ -46,6 +46,8 @@ from services.calendar_service import (
     find_next_free_slot,
     cancel_event,
     get_calendar_timezone,
+    get_subscribed_people,
+    check_attendees_busy,
 )
 from services.scheduler_service import get_today_events, get_events_for_date
 from services.analytics_service import track_event
@@ -188,6 +190,162 @@ async def _flush_ephemeral(bot, chat_id: int, user_data: dict) -> None:
             await bot.delete_message(chat_id=chat_id, message_id=mid)
         except Exception:
             pass
+
+
+def _match_contact_by_name(name: str, people: list) -> list:
+    """Fuzzy-match a name string against subscribed people [{name, email}].
+
+    Priority: exact full match → all words present → any word present (len>=3).
+    """
+    name_lower = name.lower().strip()
+    parts = [p for p in name_lower.split() if len(p) >= 3]
+
+    exact = [p for p in people if p['name'].lower() == name_lower]
+    if exact:
+        return exact
+
+    if parts:
+        all_parts = [p for p in people if all(part in p['name'].lower() for part in parts)]
+        if all_parts:
+            return all_parts
+
+        any_part = [p for p in people if any(part in p['name'].lower() for part in parts)]
+        if any_part:
+            return any_part
+
+    return []
+
+
+async def _handle_meeting_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, ai_parsed: Dict, source: str):
+    """Called from process_task when AI detects a 'meeting with person' intent."""
+    chat_id = update.effective_chat.id
+    attendee_names = ai_parsed.get('attendee_names', [])
+
+    stored_tokens = get_google_tokens(chat_id)
+    if not stored_tokens:
+        # No auth yet — fall through to normal preview (create_event will prompt auth)
+        event_data = dict(ai_parsed)
+        event_data['with_meet'] = True
+        await show_event_preview(update, context, event_data, source=source)
+        return
+
+    creds = await _get_credentials_or_notify(
+        chat_id, stored_tokens,
+        lambda t: update.message.reply_text(t, reply_markup=build_main_menu())
+    )
+    if not creds:
+        return
+
+    # Fetch people subscribed calendars (requires calendar.readonly; graceful fallback)
+    people = await asyncio.to_thread(get_subscribed_people, creds)
+
+    # Cache people for potential subsequent disambiguation callback
+    context.user_data['_cached_meeting_people'] = people
+
+    # Match each attendee name
+    resolved = []
+    not_found = []
+
+    for name in attendee_names:
+        matches = _match_contact_by_name(name, people)
+        if len(matches) == 1:
+            resolved.append(matches[0])
+        elif len(matches) > 1:
+            # Disambiguation needed — store state and show buttons
+            context.user_data['pending_meeting_event'] = ai_parsed
+            context.user_data['pending_meeting_source'] = source
+            context.user_data['pending_meeting_resolved'] = resolved
+            context.user_data['pending_meeting_not_found'] = not_found
+            remaining = attendee_names[attendee_names.index(name) + 1:]
+            context.user_data['pending_meeting_remaining'] = remaining
+            context.user_data['pending_meeting_candidates'] = matches[:5]
+            context.user_data['waiting_for'] = 'meeting_attendee_pick'
+
+            buttons = [
+                [InlineKeyboardButton(p['name'], callback_data=f"pick_attendee_{i}")]
+                for i, p in enumerate(matches[:5])
+            ]
+            buttons.append([InlineKeyboardButton("⏭ Skip this person", callback_data="pick_attendee_skip")])
+
+            _mark_ephemeral(context, await update.message.reply_text(
+                f"👥 Who did you mean by <b>{name}</b>?",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup(buttons)
+            ))
+            return
+        else:
+            not_found.append(name)
+
+    await _finalize_meeting(update, context, ai_parsed, resolved, not_found, source)
+
+
+async def _finalize_meeting(update: Update, context: ContextTypes.DEFAULT_TYPE, ai_parsed: Dict,
+                            resolved_attendees: list, not_found_names: list, source: str):
+    """Check attendee availability and show event preview with meeting fields."""
+    chat_id = update.effective_chat.id
+    msg_fn = update.effective_message.reply_text
+
+    # Freebusy check (graceful: skips on error or empty attendee list)
+    busy_names = []
+    if resolved_attendees:
+        stored_tokens = get_google_tokens(chat_id)
+        if stored_tokens:
+            creds = await _get_credentials_or_notify(
+                chat_id, stored_tokens,
+                lambda t: msg_fn(t, reply_markup=build_main_menu())
+            )
+            if creds:
+                try:
+                    start_dt = datetime.fromisoformat(ai_parsed["start_time"].replace("Z", "+00:00"))
+                    end_dt = datetime.fromisoformat(ai_parsed["end_time"].replace("Z", "+00:00"))
+                    if start_dt.tzinfo is None:
+                        start_dt = pytz.utc.localize(start_dt)
+                    if end_dt.tzinfo is None:
+                        end_dt = pytz.utc.localize(end_dt)
+                    emails = [a['email'] for a in resolved_attendees]
+                    busy_emails = await asyncio.to_thread(check_attendees_busy, creds, emails, start_dt, end_dt)
+                    busy_names = [a['name'] for a in resolved_attendees if a['email'] in busy_emails]
+                except Exception as e:
+                    print(f"[Bot] Meeting freebusy check error: {e}")
+
+    # Build event_data with meeting fields (transparently flows through existing pipeline)
+    event_data = dict(ai_parsed)
+    event_data['with_meet'] = True
+    if resolved_attendees:
+        event_data['attendees'] = [a['email'] for a in resolved_attendees]
+        event_data['attendee_display_names'] = [a['name'] for a in resolved_attendees]
+
+    # Warn about not-found contacts (silent if no contacts loaded at all)
+    if not_found_names and people_were_loaded(context):
+        names_str = ', '.join(not_found_names)
+        _mark_ephemeral(context, await msg_fn(
+            f"ℹ️ <b>{names_str}</b> not found in your subscribed calendars — event will be created without their invite.",
+            parse_mode='HTML'
+        ))
+
+    # If someone is busy, let user decide
+    if busy_names:
+        context.user_data['pending_meeting_busy_event'] = event_data
+        context.user_data['pending_meeting_busy_source'] = source
+        names_str = ', '.join(busy_names)
+        verb = 'is' if len(busy_names) == 1 else 'are'
+        markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton("➕ Invite anyway", callback_data="meeting_busy_proceed"),
+            InlineKeyboardButton("❌ Cancel", callback_data="meeting_busy_cancel"),
+        ]])
+        _mark_ephemeral(context, await msg_fn(
+            f"⚠️ <b>{names_str}</b> {verb} busy at that time.\n\nInvite them anyway?",
+            parse_mode='HTML',
+            reply_markup=markup
+        ))
+        return
+
+    await show_event_preview(update, context, event_data, source=source)
+
+
+def people_were_loaded(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """True if a subscribed-people list was fetched this session (even if empty)."""
+    return '_cached_meeting_people' in context.user_data
 
 
 async def _clear_reschedule_prompt(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
@@ -703,6 +861,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop('pending_schedule', None)
     context.user_data.pop('waiting_for', None)
     context.user_data.pop('rescheduling_event_id', None)
+    # Meeting flow state
+    for _k in ('pending_meeting_event', 'pending_meeting_source', 'pending_meeting_resolved',
+                'pending_meeting_not_found', 'pending_meeting_remaining', 'pending_meeting_candidates',
+                'pending_meeting_busy_event', 'pending_meeting_busy_source'):
+        context.user_data.pop(_k, None)
     
     # Проверяем, прошел ли онбординг
     if is_onboarded(chat_id):
@@ -972,6 +1135,11 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         context.user_data.pop('uncertain_name_prompt_msg_id', None)
         context.user_data.pop('uncertain_time_prompt_msg_id', None)
         context.user_data.pop('duration_prompt_msg_id', None)
+        # Meeting flow state (disambiguation buttons become stale after navigation)
+        for _k in ('pending_meeting_event', 'pending_meeting_source', 'pending_meeting_resolved',
+                    'pending_meeting_not_found', 'pending_meeting_remaining', 'pending_meeting_candidates',
+                    'pending_meeting_busy_event', 'pending_meeting_busy_source'):
+            context.user_data.pop(_k, None)
 
     if text == "⚙️ Settings":
         
@@ -2124,13 +2292,20 @@ def format_event_preview(event_data: Dict[str, str]) -> str:
     
     preview = f"📋 <b>{summary}</b>\n"
     preview += f"🕐 {start_str} - {end_str}\n"
-    
+
     if location:
         preview += f"📍 {location}\n"
-    
+
+    attendee_display = event_data.get('attendee_display_names', [])
+    if attendee_display:
+        preview += f"👥 {', '.join(attendee_display)}\n"
+
+    if event_data.get('with_meet'):
+        preview += "📹 Google Meet link included\n"
+
     if description:
         preview += f"\n📝 {description}"
-    
+
     return preview
 
 
@@ -3097,7 +3272,12 @@ async def process_task(update: Update, context: ContextTypes.DEFAULT_TYPE, text:
             "has_description": bool(ai_parsed.get("description")),
             "has_location": bool(ai_parsed.get("location"))
         })
-        
+
+        # Meeting-with-person flow (intercepts normal preview when AI detected meeting intent)
+        if ai_parsed.get('is_meeting') and ai_parsed.get('attendee_names'):
+            await _handle_meeting_flow(update, context, ai_parsed, source)
+            return
+
         # Check if duration was inferred (not explicitly specified by user)
         duration_inferred = bool(ai_parsed.get("duration_was_inferred", True))
         
@@ -3937,15 +4117,17 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     # - "cancel_*" - вызывают query.answer() после обработки
     # - "reschedule_leftovers" - вызывает query.answer() после переноса задач
     # Вызываем только для других callback, которые не обрабатываются дальше
-    if (not callback_data.startswith("done_") and 
-        not callback_data.startswith("already_done_") and 
-        callback_data != "refresh_today" and 
+    if (not callback_data.startswith("done_") and
+        not callback_data.startswith("already_done_") and
+        callback_data != "refresh_today" and
         not callback_data.startswith("resch_") and
         not callback_data.startswith("reschedule_") and
         not callback_data.startswith("confirm_move_") and
         not callback_data.startswith("cancel_") and
         not callback_data.startswith("del_") and
         not callback_data.startswith("delete_") and
+        not callback_data.startswith("pick_attendee_") and
+        not callback_data.startswith("meeting_busy_") and
         callback_data != "reschedule_leftovers"):
         await query.answer("")  # Убираем дублирование текста кнопки для других callback
     
@@ -4373,6 +4555,60 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             await query.answer("❌ An error occurred. Please try again.", show_alert=True)
             track_event(chat_id, "error", {"error_type": "cancel_task", "error_message": str(e)[:100]})
     
+    # ---- Meeting invite callbacks ----
+
+    elif callback_data.startswith("pick_attendee_"):
+        pick = callback_data[14:]  # strip "pick_attendee_"
+        candidates = context.user_data.pop('pending_meeting_candidates', [])
+        resolved = context.user_data.pop('pending_meeting_resolved', [])
+        not_found = context.user_data.pop('pending_meeting_not_found', [])
+        remaining = context.user_data.pop('pending_meeting_remaining', [])
+        base_event = context.user_data.pop('pending_meeting_event', None)
+        meet_source = context.user_data.pop('pending_meeting_source', 'text')
+        context.user_data.pop('waiting_for', None)
+
+        await query.edit_message_reply_markup(reply_markup=None)
+
+        if not base_event:
+            await query.answer("")
+            return
+
+        # Add chosen person (or skip)
+        if pick != "skip" and candidates:
+            try:
+                resolved.append(candidates[int(pick)])
+            except (ValueError, IndexError):
+                pass
+
+        # Resolve remaining names (no further disambiguation for simplicity)
+        cached_people = context.user_data.get('_cached_meeting_people', [])
+        for name in remaining:
+            matches = _match_contact_by_name(name, cached_people)
+            if len(matches) == 1:
+                resolved.append(matches[0])
+            elif len(matches) == 0:
+                not_found.append(name)
+            # multiple matches for remaining → skip silently
+
+        await query.answer("")
+        await _finalize_meeting(update, context, base_event, resolved, not_found, meet_source)
+
+    elif callback_data == "meeting_busy_proceed":
+        event_data = context.user_data.pop('pending_meeting_busy_event', None)
+        meet_source = context.user_data.pop('pending_meeting_busy_source', 'text')
+        await query.edit_message_reply_markup(reply_markup=None)
+        await query.answer("")
+        if event_data:
+            await show_event_preview(update, context, event_data, source=meet_source)
+
+    elif callback_data == "meeting_busy_cancel":
+        context.user_data.pop('pending_meeting_busy_event', None)
+        context.user_data.pop('pending_meeting_busy_source', None)
+        await query.edit_message_reply_markup(reply_markup=None)
+        await query.answer("")
+        await _flush_ephemeral(context.bot, chat_id, context.user_data)
+        await query.message.reply_text("❌ Meeting creation cancelled.", reply_markup=build_main_menu())
+
     # Обработка переноса остатка задач на завтра
     elif callback_data == "reschedule_leftovers":
         try:
