@@ -44,7 +44,8 @@ from services.calendar_service import (
     check_availability,
     check_slot_availability,
     find_next_free_slot,
-    cancel_event
+    cancel_event,
+    get_calendar_timezone,
 )
 from services.scheduler_service import get_today_events, get_events_for_date
 from services.analytics_service import track_event
@@ -173,6 +174,20 @@ def _clear_reschedule_state(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Clear all reschedule-related state variables"""
     for key in ['waiting_for', 'rescheduling_event_id', 'reschedule_conflict_start', 'reschedule_prompt_msg_id']:
         context.user_data.pop(key, None)
+
+
+def _mark_ephemeral(context: ContextTypes.DEFAULT_TYPE, msg) -> None:
+    """Track a bot message for later bulk deletion."""
+    context.user_data.setdefault('ephemeral_msgs', []).append(msg.message_id)
+
+
+async def _flush_ephemeral(bot, chat_id: int, user_data: dict) -> None:
+    """Delete all tracked ephemeral bot messages silently."""
+    for mid in user_data.pop('ephemeral_msgs', []):
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=mid)
+        except Exception:
+            pass
 
 
 async def _clear_reschedule_prompt(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
@@ -312,7 +327,10 @@ def init_db():
             user_name TEXT,
             morning_time TEXT NOT NULL DEFAULT '09:00',
             evening_time TEXT NOT NULL DEFAULT '21:00',
-            onboard_done INTEGER NOT NULL DEFAULT 0
+            onboard_done INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            subscription_plan TEXT NOT NULL DEFAULT 'free',
+            subscription_expires_at TEXT
         )
         """
     )
@@ -347,6 +365,20 @@ def init_db():
         pass
     try:
         cur.execute("ALTER TABLE settings ADD COLUMN default_task_duration INTEGER NOT NULL DEFAULT 30")
+    except sqlite3.OperationalError:
+        pass
+    # Монетизация: добавляем поля подписки
+    try:
+        cur.execute("ALTER TABLE settings ADD COLUMN created_at TEXT")
+        cur.execute("UPDATE settings SET created_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE created_at IS NULL")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cur.execute("ALTER TABLE settings ADD COLUMN subscription_plan TEXT NOT NULL DEFAULT 'free'")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cur.execute("ALTER TABLE settings ADD COLUMN subscription_expires_at TEXT")
     except sqlite3.OperationalError:
         pass
     cur.execute(
@@ -742,32 +774,26 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик геолокации"""
+    """Обработчик геолокации (используется только для смены таймзоны в настройках)"""
     if not update.message or not update.message.location:
         return
-    
+
     chat_id = update.effective_chat.id
-    
-    is_onboarding_tz = context.chat_data.get('onboard_stage') == 'timezone'
-    is_settings_tz = context.user_data.get('waiting_for') == 'timezone'
-    
-    if not is_onboarding_tz and not is_settings_tz:
+
+    if context.user_data.get('waiting_for') != 'timezone':
         return
-    
+
     lat = update.message.location.latitude
     lon = update.message.location.longitude
-    
+
     tz = tz_from_location(lat, lon)
     if tz:
         set_user_timezone(chat_id, tz)
-        if is_onboarding_tz:
-            await ask_morning_time(update, context)
-        else:
-            context.user_data.pop('waiting_for', None)
-            await update.message.reply_text(
-                f"✅ Timezone updated to: {tz}",
-                reply_markup=build_main_menu()
-            )
+        context.user_data.pop('waiting_for', None)
+        await update.message.reply_text(
+            f"✅ Timezone updated to: {tz}",
+            reply_markup=build_main_menu()
+        )
     else:
         await update.message.reply_text(
             "Couldn't determine timezone from location. Please try another option.",
@@ -809,7 +835,7 @@ def build_evening_time_keyboard() -> ReplyKeyboardMarkup:
 async def ask_morning_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Вопрос о времени утренней сводки"""
     await update.message.reply_text(
-        "3️⃣ At what time do you want to receive your Daily Plan?",
+        "2️⃣ At what time do you want to receive your Daily Plan?",
         reply_markup=build_morning_time_keyboard()
     )
     context.chat_data['onboard_stage'] = 'ask_morning_time'
@@ -818,7 +844,7 @@ async def ask_morning_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def ask_evening_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Вопрос о времени вечерней сводки"""
     await update.message.reply_text(
-        "4️⃣ When should I send you the Evening Recap?",
+        "3️⃣ When should I send you the Evening Recap?",
         reply_markup=build_evening_time_keyboard()
     )
     context.chat_data['onboard_stage'] = 'ask_evening_time'
@@ -844,7 +870,7 @@ def build_duration_choice_keyboard() -> ReplyKeyboardMarkup:
 async def ask_default_duration_preference(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Вопрос о предпочтении использовать дефолтную длительность для задач"""
     await update.message.reply_text(
-        "5️⃣ Should I use a default task duration when you don't specify one?\n\n"
+        "4️⃣ Should I use a default task duration when you don't specify one?\n\n"
         "This makes creating tasks faster - just confirm without specifying length.",
         reply_markup=build_default_duration_keyboard()
     )
@@ -854,7 +880,7 @@ async def ask_default_duration_preference(update: Update, context: ContextTypes.
 async def ask_default_duration_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Вопрос о значении дефолтной длительности"""
     await update.message.reply_text(
-        "6️⃣ What should be the default task duration?",
+        "5️⃣ What should be the default task duration?",
         reply_markup=build_duration_choice_keyboard()
     )
     context.chat_data['onboard_stage'] = 'ask_default_duration_value'
@@ -863,9 +889,7 @@ async def ask_default_duration_value(update: Update, context: ContextTypes.DEFAU
 async def finish_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Завершение онбординга - подключение Google Calendar"""
     chat_id = update.effective_chat.id
-    
-    # Формируем redirect_uri для callback.
-    # Если задана REDIRECT_URI, используем её (должна в точности совпадать с настройкой в Google Cloud).
+
     redirect_uri = os.getenv("REDIRECT_URI")
     if not redirect_uri:
         base_url = os.getenv("BASE_URL")
@@ -873,23 +897,28 @@ async def finish_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
             port = int(os.getenv("PORT", 10000))
             base_url = f"http://localhost:{port}"
         redirect_uri = f"{base_url}/google/callback"
-    
-    # Генерируем URL авторизации с chat_id в state
+
     auth_url = get_authorization_url(chat_id, redirect_uri)
-    
+
     user_name = get_user_name(chat_id)
     greeting = f"Perfect, {user_name}! ✅" if user_name else "Perfect! ✅"
-    
+
+    # First message removes any lingering reply-keyboard from the previous step
     await update.message.reply_text(
         f"{greeting}\n\n"
-        "To get started, connect your Google Calendar:\n\n"
-        f'<a href="{auth_url}">🔗 Connect Google Calendar</a>\n\n'
-        "Click the link above to authorize. You'll be redirected back automatically.",
-        parse_mode='HTML',
+        "All your preferences are saved.",
         reply_markup=ReplyKeyboardRemove()
     )
 
-    # Очищаем стадию онбординга — ждём завершения OAuth через callback
+    # Second message shows the inline connect button
+    await update.message.reply_text(
+        "Last step — connect your Google Calendar so I can add your tasks.\n\n"
+        "Tap the button below to authorize. You'll be redirected back automatically.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔗 Connect Google Calendar", url=auth_url)]
+        ])
+    )
+
     context.chat_data['onboard_stage'] = 'awaiting_gcal_auth'
 
 
@@ -1791,75 +1820,16 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     # Обработка онбординга
     if context.chat_data.get('onboard_stage') == 'ask_name':
-        # Вопрос об имени
         if text.strip():
             try:
                 validated_name = _validate_user_input(text, "Name", max_length=100)
                 set_user_name(chat_id, validated_name)
-                await ask_timezone(update, context)
+                await ask_morning_time(update, context)
             except ValueError as e:
                 await update.message.reply_text(f"❌ {e}\n\nPlease enter your name:")
         else:
-            await update.message.reply_text(
-                "Please enter your name:"
-            )
+            await update.message.reply_text("Please enter your name:")
         return
-
-    if context.chat_data.get('onboard_stage') == 'timezone':
-        # Пользователь выбирает таймзону
-        if text == "✏️ Enter City Manually":
-            await update.message.reply_text(
-                "Please enter your city/timezone manually (e.g., Europe/London, America/New_York, Asia/Tokyo):",
-                reply_markup=ReplyKeyboardRemove()
-            )
-            context.chat_data['onboard_stage'] = 'timezone_manual'
-            return
-
-        if text == "🌍 Choose from UTC List":
-            await update.message.reply_text(
-                "Choose your UTC offset:",
-                reply_markup=build_utc_list_keyboard()
-            )
-            context.chat_data['onboard_stage'] = 'timezone_utc_list'
-            return
-
-        # Если это не кнопка, значит пользователь ввел что-то другое
-        await update.message.reply_text(
-            "Please choose one of the options:",
-            reply_markup=build_timezone_keyboard()
-        )
-        return
-
-    if context.chat_data.get('onboard_stage') == 'timezone_manual':
-        # Пользователь вводит таймзону вручную
-        try:
-            pytz.timezone(text)
-            set_user_timezone(chat_id, text)
-            await ask_morning_time(update, context)
-        except pytz.exceptions.UnknownTimeZoneError:
-            await update.message.reply_text(
-                "Invalid timezone. Please enter a valid timezone (e.g., Europe/London):"
-            )
-        return
-
-    if context.chat_data.get('onboard_stage') == 'timezone_utc_list':
-        # Пользователь выбрал UTC из списка
-        if text == "⬅️ Back":
-            await ask_timezone(update, context)
-            return
-        
-        # Парсим UTC offset
-        tz = parse_utc_offset(text)
-        if tz:
-            set_user_timezone(chat_id, tz)
-            await ask_morning_time(update, context)
-            return
-        else:
-            await update.message.reply_text(
-                "Invalid selection. Please choose from the list:",
-                reply_markup=build_utc_list_keyboard()
-            )
-            return
     
     if context.chat_data.get('onboard_stage') == 'ask_morning_time':
         # Вопрос о времени утренней сводки
@@ -2042,7 +2012,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             context.chat_data.pop('onboard_stage', None)
         else:
             await update.message.reply_text(
-                "⏳ Please click the Google Calendar link above to finish setup.\n\n"
+                "⏳ Please tap the Connect Google Calendar button above to finish setup.\n\n"
                 "Once you authorize, you'll be ready to add tasks!"
             )
             return
@@ -2070,7 +2040,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             context.chat_data.pop('onboard_stage', None)
         else:
             await update.message.reply_text(
-                "⏳ Please click the Google Calendar link above to finish setup.\n\n"
+                "⏳ Please tap the Connect Google Calendar button above to finish setup.\n\n"
                 "Once you authorize, you'll be ready to add tasks!"
             )
             return
@@ -2325,7 +2295,7 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
             context.chat_data.pop('onboard_stage', None)
         else:
             await update.message.reply_text(
-                "⏳ Please click the Google Calendar link above to finish setup.\n\n"
+                "⏳ Please tap the Connect Google Calendar button above to finish setup.\n\n"
                 "Once you authorize, you'll be ready to add tasks!"
             )
             return
@@ -2360,7 +2330,7 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
             context.chat_data.pop('onboard_stage', None)
         else:
             await update.message.reply_text(
-                "⏳ Please click the Google Calendar link above to finish setup.\n\n"
+                "⏳ Please tap the Connect Google Calendar button above to finish setup.\n\n"
                 "Once you authorize, you'll be ready to add tasks!"
             )
             return
@@ -3104,20 +3074,20 @@ async def process_task(update: Update, context: ContextTypes.DEFAULT_TYPE, text:
         
         # Проверяем, является ли это задачей
         if not ai_parsed.get("is_task", True):
-            await update.message.reply_text(
+            _mark_ephemeral(context, await update.message.reply_text(
                 "I didn't understand what task this is. Please try again with a clearer format (e.g., 'Meeting tomorrow at 3 PM' or 'Buy milk today at 15:00').",
                 reply_markup=build_main_menu()
-            )
+            ))
             track_event(chat_id, "not_a_task", {"source": source})
             return
 
         # Дополнительная проверка: если summary пустой или слишком короткий, это может быть не задача
         summary = ai_parsed.get("summary", "").strip()
         if not summary or len(summary) < 2:
-            await update.message.reply_text(
+            _mark_ephemeral(context, await update.message.reply_text(
                 "I didn't understand what task this is. Please specify a clear action or event (e.g., 'Meeting tomorrow at 3 PM' or 'Buy milk today at 15:00').",
                 reply_markup=build_main_menu()
-            )
+            ))
             track_event(chat_id, "not_a_task", {"source": source, "reason": "empty_summary"})
             return
 
@@ -3174,7 +3144,15 @@ async def process_task(update: Update, context: ContextTypes.DEFAULT_TYPE, text:
 async def show_daily_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает задачи на сегодня с возможностью отметки"""
     chat_id = update.effective_chat.id
-    
+
+    # Delete the previous task list so only one exists at a time
+    prev_id = context.user_data.pop('last_tasks_today_msg_id', None)
+    if prev_id:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=prev_id)
+        except Exception:
+            pass
+
     # Проверяем авторизацию Google Calendar
     stored_tokens = get_google_tokens(chat_id)
     if not stored_tokens:
@@ -3194,17 +3172,18 @@ async def show_daily_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         # Получаем таймзону пользователя
         user_timezone = get_user_timezone(chat_id) or DEFAULT_TZ
-        
+
         # Получаем события на сегодня
         events = get_today_events(credentials, user_timezone)
-        
+
         if not events:
-            await update.message.reply_text(
+            msg = await update.message.reply_text(
                 "📅 <b>Here are your tasks for today:</b>\n\n"
                 "No tasks scheduled for today! 🎉",
                 reply_markup=build_main_menu(),
                 parse_mode='HTML'
             )
+            context.user_data['last_tasks_today_msg_id'] = msg.message_id
             return
 
         # Разделяем выполненные и невыполненные задачи; скрываем отменённые (❌)
@@ -3271,11 +3250,12 @@ async def show_daily_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else build_main_menu()
 
-        await update.message.reply_text(
+        msg = await update.message.reply_text(
             message_text,
             reply_markup=reply_markup,
             parse_mode='HTML'
         )
+        context.user_data['last_tasks_today_msg_id'] = msg.message_id
 
     except Exception as e:
         print(f"[Bot] Ошибка при отображении задач на сегодня: {e}")
@@ -3516,9 +3496,10 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
         auth_url = get_authorization_url(chat_id, redirect_uri)
         await query.edit_message_text(
-            "To (re)connect your Google Calendar, click the link below:\n\n"
-            f'<a href="{auth_url}">🔗 Connect Google Calendar</a>',
-            parse_mode='HTML'
+            "Tap the button below to (re)connect your Google Calendar:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔗 Connect Google Calendar", url=auth_url)]
+            ])
         )
         return
 
@@ -4608,10 +4589,10 @@ async def create_calendar_event(update: Update, context: ContextTypes.DEFAULT_TY
         auth_url = get_authorization_url(chat_id, redirect_uri)
         print(f"[Bot] Отправляем ссылку на авторизацию Google Calendar для chat_id={chat_id}")
         await reply_fn(
-            f"🔗 Please connect your Google Calendar first:\n\n"
-            f'<a href="{auth_url}">🔗 Connect Google Calendar</a>',
-            reply_markup=build_main_menu(),
-            parse_mode='HTML'
+            "Please connect your Google Calendar first:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔗 Connect Google Calendar", url=auth_url)]
+            ])
         )
         return
 
@@ -4669,7 +4650,7 @@ async def create_calendar_event(update: Update, context: ContextTypes.DEFAULT_TY
                     InlineKeyboardButton("✏️ Change time", callback_data="conflict_change_time"),
                 ],
             ])
-            await reply_fn(conflict_text, reply_markup=markup)
+            _mark_ephemeral(context, await reply_fn(conflict_text, reply_markup=markup))
             return
     except Exception as e:
         print(f"[Bot] Error checking conflicts before event creation: {e}")
@@ -4687,7 +4668,9 @@ async def _do_create_and_confirm(update: Update, context: ContextTypes.DEFAULT_T
     event_url = create_event(credentials, event_data)
 
     if event_url:
-        # Успешно создано
+        # Успешно создано — очищаем мусор перед отправкой финального сообщения
+        await _flush_ephemeral(context.bot, chat_id, context.user_data)
+
         track_event(chat_id, "calendar_event_created", {
             "source": source,
             "summary": event_data.get("summary", "")[:50]
@@ -4861,7 +4844,18 @@ def main():
                 # Сохраняем токены в БД
                 save_google_tokens(chat_id, tokens)
                 set_onboarded(chat_id, True)
-                
+
+                # Читаем таймзону из Google Calendar и сохраняем её
+                try:
+                    creds = get_credentials_from_stored(chat_id, tokens)
+                    if creds:
+                        cal_tz = await asyncio.to_thread(get_calendar_timezone, creds)
+                        if cal_tz:
+                            set_user_timezone(chat_id, cal_tz)
+                            print(f"[Bot] Timezone set from Google Calendar: {cal_tz} for chat_id={chat_id}")
+                except Exception as e:
+                    print(f"[Bot] Could not read timezone from Google Calendar: {e}")
+
                 # Отправляем уведомление пользователю в Telegram
                 try:
                     welcome_msg = await app.bot.send_message(

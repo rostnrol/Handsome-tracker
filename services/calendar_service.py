@@ -574,11 +574,11 @@ def reschedule_event(credentials: Credentials, event_id: str, new_start_time: da
 def cancel_event(credentials: Credentials, event_id: str) -> bool:
     """
     Удаляет событие из Google Calendar.
-    
+
     Args:
         credentials: Объект Credentials для доступа к API
         event_id: ID события в Google Calendar
-    
+
     Returns:
         True если успешно, False в случае ошибки
     """
@@ -586,11 +586,22 @@ def cancel_event(credentials: Credentials, event_id: str) -> bool:
         service = build('calendar', 'v3', credentials=credentials)
         service.events().delete(calendarId='primary', eventId=event_id).execute()
         return True
-        
+
     except HttpError as e:
         print(f"[Calendar Service] Ошибка HTTP при удалении события: {e}")
         return False
     except Exception as e:
         print(f"[Calendar Service] Ошибка при отмене события: {e}")
         return False
+
+
+def get_calendar_timezone(credentials: Credentials) -> Optional[str]:
+    """Returns the IANA timezone string from the user's primary Google Calendar."""
+    try:
+        service = build('calendar', 'v3', credentials=credentials)
+        calendar = service.calendars().get(calendarId='primary').execute()
+        return calendar.get('timeZone')
+    except Exception as e:
+        logger.error(f"[Calendar Service] Failed to fetch calendar timezone: {e}")
+        return None
 

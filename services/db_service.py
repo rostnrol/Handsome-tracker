@@ -181,3 +181,48 @@ def store_morning_msg(chat_id: int, message_id: int) -> None:
         """, (chat_id, message_id))
         con.commit()
 
+
+# ---- Subscription helpers (schema ready, logic wired later) ----
+
+def get_subscription_plan(chat_id: int) -> str:
+    """Returns the user's current subscription plan ('free' or 'premium')."""
+    with get_db_connection() as con:
+        cur = con.cursor()
+        cur.execute("SELECT subscription_plan FROM settings WHERE chat_id=?", (chat_id,))
+        row = cur.fetchone()
+        return row[0] if row and row[0] else "free"
+
+
+def set_subscription_plan(chat_id: int, plan: str, expires_at: Optional[str] = None) -> None:
+    """Set subscription plan and optional expiry (ISO UTC string or None)."""
+    with get_db_connection() as con:
+        cur = con.cursor()
+        cur.execute(
+            """
+            INSERT INTO settings (chat_id, subscription_plan, subscription_expires_at, onboard_done)
+            VALUES (?, ?, ?, COALESCE((SELECT onboard_done FROM settings WHERE chat_id=?), 0))
+            ON CONFLICT(chat_id) DO UPDATE SET
+                subscription_plan=excluded.subscription_plan,
+                subscription_expires_at=excluded.subscription_expires_at
+            """,
+            (chat_id, plan, expires_at, chat_id),
+        )
+        con.commit()
+
+
+def get_subscription_expires_at(chat_id: int) -> Optional[str]:
+    """Returns the subscription expiry as an ISO UTC string, or None."""
+    with get_db_connection() as con:
+        cur = con.cursor()
+        cur.execute("SELECT subscription_expires_at FROM settings WHERE chat_id=?", (chat_id,))
+        row = cur.fetchone()
+        return row[0] if row else None
+
+
+def get_user_created_at(chat_id: int) -> Optional[str]:
+    """Returns the UTC ISO timestamp when this user record was first created."""
+    with get_db_connection() as con:
+        cur = con.cursor()
+        cur.execute("SELECT created_at FROM settings WHERE chat_id=?", (chat_id,))
+        row = cur.fetchone()
+        return row[0] if row else None

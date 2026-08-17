@@ -132,30 +132,38 @@ def get_events_for_date(credentials, user_timezone: str, target_date) -> List[Di
         return []
 
 
-async def _cleanup_and_store(bot, chat_id: int, new_morning_msg_id: int):
-    """Delete all messages between the previous morning briefing and the new one, then record the new ID."""
+async def _cleanup_and_store(bot, chat_id: int, new_morning_msg_id: int, user_data: dict):
+    """
+    At each morning briefing:
+    - Delete the previous morning briefing message
+    - Delete the previous manual task list (📋 Tasks for Today)
+    - Delete the previous evening recap
+    - Delete any tracked ephemeral messages (errors, prompts)
+    - Store the new morning briefing ID
+    Permanent messages like "✅ Event added: ..." are intentionally left alone.
+    """
     try:
-        cleanup_info = get_cleanup_info(chat_id)
-        if cleanup_info:
-            welcome_id, prev_morning_id = cleanup_info
-            if prev_morning_id and new_morning_msg_id > prev_morning_id + 1:
-                ids_to_delete = [
-                    i for i in range(prev_morning_id + 1, new_morning_msg_id)
-                    if i != welcome_id
-                ]
-                # Delete in batches of 100 (Telegram limit)
-                for i in range(0, len(ids_to_delete), 100):
-                    batch = ids_to_delete[i:i + 100]
-                    try:
-                        await bot.delete_messages(chat_id=chat_id, message_ids=batch)
-                    except Exception:
-                        pass
+        async def _try_delete(mid):
+            if mid:
+                try:
+                    await bot.delete_message(chat_id=chat_id, message_id=mid)
+                except Exception:
+                    pass
+
+        await _try_delete(user_data.pop('last_morning_bot_msg_id', None))
+        await _try_delete(user_data.pop('last_tasks_today_msg_id', None))
+        await _try_delete(user_data.pop('last_evening_msg_id', None))
+
+        for mid in user_data.pop('ephemeral_msgs', []):
+            await _try_delete(mid)
+
+        user_data['last_morning_bot_msg_id'] = new_morning_msg_id
         store_morning_msg(chat_id, new_morning_msg_id)
     except Exception as e:
         print(f"[Scheduler Service] Cleanup error for chat_id={chat_id}: {e}")
 
 
-async def send_morning_briefing(bot, chat_id: int, user_timezone: str):
+async def send_morning_briefing(bot, chat_id: int, user_timezone: str, user_data: dict = None):
     """
     Отправляет утренний брифинг пользователю.
 
@@ -203,7 +211,10 @@ async def send_morning_briefing(bot, chat_id: int, user_timezone: str):
                 chat_id=chat_id,
                 text="No tasks for today yet. Enjoy your freedom!"
             )
-            await _cleanup_and_store(bot, chat_id, msg.message_id)
+            if user_data is not None:
+                await _cleanup_and_store(bot, chat_id, msg.message_id, user_data)
+            else:
+                store_morning_msg(chat_id, msg.message_id)
             return
 
         # Форматируем список задач (Time - Title)
@@ -239,7 +250,10 @@ async def send_morning_briefing(bot, chat_id: int, user_timezone: str):
                 chat_id=chat_id,
                 text="No tasks for today yet. Enjoy your freedom!"
             )
-            await _cleanup_and_store(bot, chat_id, msg.message_id)
+            if user_data is not None:
+                await _cleanup_and_store(bot, chat_id, msg.message_id, user_data)
+            else:
+                store_morning_msg(chat_id, msg.message_id)
             return
 
         briefing = "📅 Here's your task list for today:\n\n" + "\n".join(tasks_list)
@@ -248,7 +262,10 @@ async def send_morning_briefing(bot, chat_id: int, user_timezone: str):
             chat_id=chat_id,
             text=briefing
         )
-        await _cleanup_and_store(bot, chat_id, msg.message_id)
+        if user_data is not None:
+            await _cleanup_and_store(bot, chat_id, msg.message_id, user_data)
+        else:
+            store_morning_msg(chat_id, msg.message_id)
     except Exception as e:
         print(f"[Scheduler Service] Ошибка при отправке утреннего брифинга: {e}")
         try:
@@ -260,7 +277,7 @@ async def send_morning_briefing(bot, chat_id: int, user_timezone: str):
             pass
 
 
-async def send_evening_recap(bot, chat_id: int, user_timezone: str):
+async def send_evening_recap(bot, chat_id: int, user_timezone: str, user_data: dict = None):
     """
     Отправляет вечернюю сводку пользователю с inline-кнопками для отметки задач.
     
@@ -377,11 +394,13 @@ async def send_evening_recap(bot, chat_id: int, user_timezone: str):
         reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
         
         # Отправляем сообщение с кнопками
-        await bot.send_message(
+        msg = await bot.send_message(
             chat_id=chat_id,
             text=message_text,
             reply_markup=reply_markup
         )
+        if user_data is not None:
+            user_data['last_evening_msg_id'] = msg.message_id
     except Exception as e:
         print(f"[Scheduler Service] Ошибка при отправке вечерней сводки: {e}")
         try:
@@ -475,15 +494,17 @@ async def check_and_send_briefings(app):
                 now_local = now_utc.astimezone(user_tz)
                 current_time_str = now_local.strftime("%H:%M")
 
+                user_data = app.user_data[chat_id]
+
                 # Проверяем, нужно ли отправить утреннюю сводку
                 if morning_time and current_time_str == morning_time:
                     print(f"[Scheduler] Sending morning briefing to {chat_id} at {current_time_str} ({tz_str})")
-                    await send_morning_briefing(bot, chat_id, tz_str)
+                    await send_morning_briefing(bot, chat_id, tz_str, user_data=user_data)
 
                 # Проверяем, нужно ли отправить вечернюю сводку
                 if evening_time and current_time_str == evening_time:
                     print(f"[Scheduler] Sending evening recap to {chat_id} at {current_time_str} ({tz_str})")
-                    await send_evening_recap(bot, chat_id, tz_str)
+                    await send_evening_recap(bot, chat_id, tz_str, user_data=user_data)
 
             except Exception as e:
                 print(f"[Scheduler Service] Ошибка при обработке пользователя {chat_id}: {e}")
