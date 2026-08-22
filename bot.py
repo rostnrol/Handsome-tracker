@@ -268,7 +268,7 @@ async def _handle_meeting_flow(update: Update, context: ContextTypes.DEFAULT_TYP
             buttons.append([InlineKeyboardButton("⏭ Skip this person", callback_data="pick_attendee_skip")])
 
             _mark_ephemeral(context, await update.message.reply_text(
-                f"👥 Who did you mean by <b>{name}</b>?",
+                "👥 Multiple matches found — who did you mean?",
                 parse_mode='HTML',
                 reply_markup=InlineKeyboardMarkup(buttons)
             ))
@@ -317,9 +317,10 @@ async def _finalize_meeting(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
     # Warn about not-found contacts (silent if no contacts loaded at all)
     if not_found_names and people_were_loaded(context):
-        names_str = ', '.join(not_found_names)
+        count = len(not_found_names)
+        noun = "person" if count == 1 else "people"
         _mark_ephemeral(context, await msg_fn(
-            f"ℹ️ <b>{names_str}</b> not found in your subscribed calendars — event will be created without their invite.",
+            f"ℹ️ {count} {noun} could not be found in your subscribed calendars — event will be created without their invite.",
             parse_mode='HTML'
         ))
 
@@ -984,7 +985,7 @@ def build_morning_time_keyboard() -> ReplyKeyboardMarkup:
     """Создает клавиатуру для выбора времени утренней сводки"""
     keyboard = [
         [KeyboardButton("08:00"), KeyboardButton("09:00"), KeyboardButton("10:00")],
-        [KeyboardButton("✏️ Enter Manually")]
+        [KeyboardButton("🚫 Don't send"), KeyboardButton("✏️ Enter Manually")],
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
 
@@ -993,7 +994,7 @@ def build_evening_time_keyboard() -> ReplyKeyboardMarkup:
     """Создает клавиатуру для выбора времени вечерней сводки"""
     keyboard = [
         [KeyboardButton("18:00"), KeyboardButton("21:00"), KeyboardButton("23:00")],
-        [KeyboardButton("✏️ Enter Manually")]
+        [KeyboardButton("🚫 Don't send"), KeyboardButton("✏️ Enter Manually")],
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
 
@@ -1056,15 +1057,11 @@ async def finish_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Завершение онбординга - подключение Google Calendar"""
     chat_id = update.effective_chat.id
 
-    redirect_uri = os.getenv("REDIRECT_URI")
-    if not redirect_uri:
-        base_url = os.getenv("BASE_URL")
-        if not base_url:
-            port = int(os.getenv("PORT", 10000))
-            base_url = f"http://localhost:{port}"
-        redirect_uri = f"{base_url}/google/callback"
-
-    auth_url = get_authorization_url(chat_id, redirect_uri)
+    base_url = os.getenv("BASE_URL")
+    if not base_url:
+        port = int(os.getenv("PORT", 10000))
+        base_url = f"http://localhost:{port}"
+    connect_url = f"{base_url}/auth?id={chat_id}"
 
     user_name = get_user_name(chat_id)
     greeting = f"Perfect, {user_name}! ✅" if user_name else "Perfect! ✅"
@@ -1081,11 +1078,12 @@ async def finish_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Last step — connect your Google Calendar so I can add your tasks.\n\n"
         "Tap the button below to authorize. You'll be redirected back automatically.",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔗 Connect Google Calendar", url=auth_url)]
+            [InlineKeyboardButton("🔗 Connect Google Calendar", url=connect_url)]
         ])
     )
 
     context.chat_data['onboard_stage'] = 'awaiting_gcal_auth'
+    track_event(chat_id, "onboarding_connect_gcal_shown")
 
 
 # ---- Button Helper Functions ----
@@ -1116,13 +1114,15 @@ def build_edit_menu_buttons() -> InlineKeyboardMarkup:
     ])
 
 
-async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE, _text_override: str = None):
     """Обработчик текстовых сообщений"""
-    if not update.message or not update.message.text:
+    if not update.message:
         return
-    
+    if _text_override is None and not update.message.text:
+        return
+
     chat_id = update.effective_chat.id
-    text = update.message.text.strip()
+    text = (_text_override if _text_override is not None else update.message.text).strip()
     
     # Обработка команд меню (проверяем ПЕРЕД состоянием, чтобы пользователь мог отменить)
     if text in ("⚙️ Settings", "📋 Tasks for Today", "📅 Tasks for Tomorrow", "📆 Tasks for a Date", "📅 Open Google Calendar", "❓ Uncertain Event"):
@@ -1159,8 +1159,8 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         if user_name:
             settings_text += f"Name: {user_name}\n"
         settings_text += f"Timezone: {tz}\n"
-        settings_text += f"Morning briefing: {morning_time}\n"
-        settings_text += f"Evening recap: {evening_time}\n"
+        settings_text += f"Morning briefing: {'disabled' if morning_time == 'off' else morning_time}\n"
+        settings_text += f"Evening recap: {'disabled' if evening_time == 'off' else evening_time}\n"
         if use_default_dur:
             settings_text += f"Task duration: {default_dur} min (default)\n"
         else:
@@ -1386,7 +1386,13 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             context.user_data['waiting_for'] = 'morning_time_manual'
             return
-        
+
+        if text == "🚫 Don't send":
+            set_morning_time(chat_id, "off")
+            await update.message.reply_text("✅ Morning briefing disabled.", reply_markup=build_main_menu())
+            context.user_data.pop('waiting_for', None)
+            return
+
         # Проверяем формат времени из кнопок
         if text in ["08:00", "09:00", "10:00"]:
             set_morning_time(chat_id, text)
@@ -1433,7 +1439,13 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             context.user_data['waiting_for'] = 'evening_time_manual'
             return
-        
+
+        if text == "🚫 Don't send":
+            set_evening_time(chat_id, "off")
+            await update.message.reply_text("✅ Evening recap disabled.", reply_markup=build_main_menu())
+            context.user_data.pop('waiting_for', None)
+            return
+
         # Проверяем формат времени из кнопок
         if text in ["18:00", "21:00", "23:00"]:
             set_evening_time(chat_id, text)
@@ -2012,6 +2024,11 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             context.chat_data['onboard_stage'] = 'ask_morning_time_manual'
             return
 
+        if text == "🚫 Don't send":
+            set_morning_time(chat_id, "off")
+            await ask_evening_time(update, context)
+            return
+
         # Проверяем, является ли это валидным временем
         try:
             if ':' in text:
@@ -2060,6 +2077,11 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 reply_markup=ReplyKeyboardRemove()
             )
             context.chat_data['onboard_stage'] = 'ask_evening_time_manual'
+            return
+
+        if text == "🚫 Don't send":
+            set_evening_time(chat_id, "off")
+            await ask_default_duration_preference(update, context)
             return
 
         # Проверяем, является ли это валидным временем
@@ -2255,8 +2277,13 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             track_event(chat_id, "error", {"error_type": "voice_transcription_failed"})
             return
 
-        # Обрабатываем транскрибированный текст
-        await process_task(update, context, text=transcribed_text, source="voice")
+        # Route to active state handler or create new task
+        waiting_for = context.user_data.get('waiting_for')
+        is_waiting_weeks = context.user_data.get('state') == 'WAITING_FOR_WEEKS'
+        if waiting_for or is_waiting_weeks:
+            await handle_text_message(update, context, _text_override=transcribed_text)
+        else:
+            await process_task(update, context, text=transcribed_text, source="voice")
     finally:
         # Удаляем временный файл
         try:
@@ -2484,6 +2511,14 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
 
+    # If bot is waiting for a specific response, photos can't satisfy that
+    if context.user_data.get('waiting_for') or context.user_data.get('state') == 'WAITING_FOR_WEEKS':
+        await update.message.reply_text(
+            "📷 Photos are for importing tasks. Please respond to the pending question first.",
+            reply_markup=build_main_menu()
+        )
+        return
+
     # Получаем фото наибольшего размера
     photo = update.message.photo[-1]
     await _process_photo_file(update, context, photo.file_id, suffix='.jpg')
@@ -2516,6 +2551,14 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
     if not is_onboarded(chat_id):
         await update.message.reply_text(
             "Please complete the setup first by sending /start"
+        )
+        return
+
+    # If bot is waiting for a specific response, photos can't satisfy that
+    if context.user_data.get('waiting_for') or context.user_data.get('state') == 'WAITING_FOR_WEEKS':
+        await update.message.reply_text(
+            "📷 Photos are for importing tasks. Please respond to the pending question first.",
+            reply_markup=build_main_menu()
         )
         return
 
@@ -3635,6 +3678,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     elif callback_data == "set_tz":
         await query.answer("")
+        track_event(chat_id, "settings_tz_opened")
         await query.edit_message_text("🌍 Changing timezone...")
         await query.message.reply_text(
             "🌍 Share your location or enter timezone manually:",
@@ -3645,6 +3689,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     elif callback_data == "set_morning":
         await query.answer("")
+        track_event(chat_id, "settings_morning_opened")
         await query.edit_message_text("🌅 Changing morning briefing time...")
         await query.message.reply_text(
             "🌅 At what time do you want to receive your Daily Plan?\n\n"
@@ -3656,6 +3701,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     elif callback_data == "set_evening":
         await query.answer("")
+        track_event(chat_id, "settings_evening_opened")
         await query.edit_message_text("🌙 Changing evening recap time...")
         await query.message.reply_text(
             "🌙 When should I send you the Evening Recap?\n\n"
@@ -3668,20 +3714,16 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     elif callback_data == "connect_gcal":
         await query.answer("")  # тихий ответ
         chat_id = query.message.chat_id
-        # Формируем redirect_uri для callback.
-        redirect_uri = os.getenv("REDIRECT_URI")
-        if not redirect_uri:
-            base_url = os.getenv("BASE_URL")
-            if not base_url:
-                port = int(os.getenv("PORT", 10000))
-                base_url = f"http://localhost:{port}"
-            redirect_uri = f"{base_url}/google/callback"
-
-        auth_url = get_authorization_url(chat_id, redirect_uri)
+        track_event(chat_id, "settings_connect_gcal_tapped")
+        base_url = os.getenv("BASE_URL")
+        if not base_url:
+            port = int(os.getenv("PORT", 10000))
+            base_url = f"http://localhost:{port}"
+        connect_url = f"{base_url}/auth?id={chat_id}"
         await query.edit_message_text(
             "Tap the button below to (re)connect your Google Calendar:",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔗 Connect Google Calendar", url=auth_url)]
+                [InlineKeyboardButton("🔗 Connect Google Calendar", url=connect_url)]
             ])
         )
         return
@@ -3689,6 +3731,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     elif callback_data == "disconnect_gcal":
         await query.answer("")  # тихий ответ
         chat_id = query.message.chat_id
+        track_event(chat_id, "gcal_disconnected")
         # Удаляем токены и помечаем, что онбординг по календарю больше не активен
         delete_google_tokens(chat_id)
         set_onboarded(chat_id, False)
@@ -3702,6 +3745,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     elif callback_data == "set_duration":
         await query.answer("")
+        track_event(chat_id, "settings_duration_opened")
         use_default = get_use_default_duration(chat_id)
         default_dur = get_default_task_duration(chat_id)
         status = f"{default_dur} min default" if use_default else "ask each time"
@@ -3728,6 +3772,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     elif callback_data == "duration_ask":
         await query.answer("")
         set_default_duration_settings(chat_id, False, get_default_task_duration(chat_id))
+        track_event(chat_id, "settings_duration_ask_mode_set")
         await query.edit_message_text("✅ I'll ask you for duration each time it's not specified.")
         return
 
@@ -3779,7 +3824,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     elif callback_data == "event_edit":
         await query.answer("")  # тихий ответ
         chat_id = query.message.chat_id
-        
+        track_event(chat_id, "event_edit_opened")
         await query.edit_message_text(
             "What would you like to edit?",
             reply_markup=build_edit_menu_buttons()
@@ -3811,7 +3856,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     elif callback_data == "schedule_cancel":
         await query.answer("")  # тихий ответ
-
+        track_event(chat_id, "schedule_preview_cancelled")
         # Очищаем сохраненные данные
         context.user_data.pop('pending_schedule_preview', None)
         context.user_data.pop('pending_event_source', None)
@@ -3829,6 +3874,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data.pop('pending_schedule', None)
 
         if callback_data == "schedule_weeks_cancel" or not events_to_create:
+            track_event(chat_id, "schedule_import_cancelled")
             await query.edit_message_text("❌ Schedule import cancelled.")
             await query.message.reply_text("What would you like to do next?", reply_markup=build_main_menu())
             return
@@ -3921,6 +3967,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     # Обработка редактирования события
     elif callback_data == "edit_title":
         await query.answer("")  # тихий ответ
+        track_event(chat_id, "event_edit_title_started")
         await query.edit_message_text(
             "📋 Enter new event title:"
         )
@@ -3929,6 +3976,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     elif callback_data == "edit_location":
         await query.answer("")  # тихий ответ
+        track_event(chat_id, "event_edit_location_started")
         await query.edit_message_text(
             "📍 Enter new location (or send '-' to clear it):"
         )
@@ -3937,6 +3985,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     elif callback_data == "edit_time":
         await query.answer("")  # тихий ответ
+        track_event(chat_id, "event_edit_time_started")
         await query.edit_message_text(
             "🕐 Enter new time (e.g., 'Mon 21:00' or '14:30'):"
         )
@@ -3945,6 +3994,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     elif callback_data == "cancel_edit":
         await query.answer("")  # тихий ответ
+        track_event(chat_id, "event_edit_cancelled")
 
         # Показываем предпросмотр еще раз
         event_data = context.user_data.get('pending_event_preview')
@@ -3962,6 +4012,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     elif callback_data == "conflict_replace":
         await query.answer("")
+        track_event(chat_id, "conflict_replace_chosen")
         event_data = context.user_data.pop('pending_conflict_event', None)
         source = context.user_data.pop('pending_conflict_source', 'unknown')
         conflict_ids = context.user_data.pop('pending_conflict_ids', [])
@@ -3990,6 +4041,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     elif callback_data == "conflict_proceed":
         await query.answer("")
+        track_event(chat_id, "conflict_proceed_chosen")
         event_data = context.user_data.pop('pending_conflict_event', None)
         source = context.user_data.pop('pending_conflict_source', 'unknown')
         context.user_data.pop('pending_conflict_ids', None)
@@ -4011,6 +4063,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     elif callback_data == "conflict_change_time":
         await query.answer("")
+        track_event(chat_id, "conflict_change_time_chosen")
         event_data = context.user_data.pop('pending_conflict_event', None)
         source = context.user_data.pop('pending_conflict_source', 'unknown')
         context.user_data.pop('pending_conflict_ids', None)
@@ -4068,6 +4121,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     elif callback_data == "conflict_use_slot":
         await query.answer("")
+        track_event(chat_id, "conflict_use_suggested_slot")
         event_data = context.user_data.pop('pending_event_preview', None)
         source = context.user_data.pop('pending_event_source', 'unknown')
         suggested_iso = context.user_data.pop('conflict_suggested_start', None)
@@ -4085,6 +4139,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     elif callback_data == "conflict_manual_time":
         await query.answer("")
+        track_event(chat_id, "conflict_manual_time_chosen")
         context.user_data.pop('conflict_suggested_start', None)
         context.user_data['waiting_for'] = 'edit_event_time'
         await query.edit_message_text(
@@ -4094,6 +4149,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     elif callback_data == "conflict_cancel":
         await query.answer("")
+        track_event(chat_id, "conflict_cancelled")
         context.user_data.pop('pending_conflict_event', None)
         context.user_data.pop('pending_conflict_source', None)
         context.user_data.pop('pending_conflict_ids', None)
@@ -4103,6 +4159,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     elif callback_data == "cancel_task_duration":
         await query.answer("")
+        track_event(chat_id, "task_duration_cancelled")
         context.user_data.pop('waiting_for', None)
         context.user_data.pop('pending_event_data', None)
         context.user_data.pop('pending_event_source', None)
@@ -4506,20 +4563,33 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     # Обработка удаления задачи (del_ or legacy delete_)
     elif callback_data.startswith("del_") or callback_data.startswith("delete_"):
         event_id = callback_data[4:] if callback_data.startswith("del_") else callback_data[7:]
-        
+
         try:
             success = cancel_event(credentials, event_id)
-            
+
             if success:
                 inline_keyboard = query.message.reply_markup.inline_keyboard if query.message.reply_markup else []
                 new_keyboard = _remove_task_row(inline_keyboard, event_id)
                 new_markup = InlineKeyboardMarkup(new_keyboard) if new_keyboard else None
-                await query.edit_message_reply_markup(reply_markup=new_markup)
+                if not new_keyboard:
+                    msg_text = query.message.text or ""
+                    is_evening = "hope it was a productive day" in msg_text
+                    done_text = (
+                        "Hey, hope it was a productive day!\n\n🎉 All done for today!"
+                        if is_evening else
+                        "📅 <b>Here are your tasks for today:</b>\n\n🎉 All tasks completed! Great job!"
+                    )
+                    try:
+                        await query.edit_message_text(done_text, parse_mode='HTML', reply_markup=None)
+                    except Exception:
+                        await query.edit_message_reply_markup(reply_markup=None)
+                else:
+                    await query.edit_message_reply_markup(reply_markup=new_markup)
                 await query.answer("✅ Task deleted!")
                 track_event(chat_id, "task_deleted", {"event_id": event_id})
             else:
                 await query.answer("❌ Failed to delete task. Please try again.", show_alert=True)
-                
+
         except Exception as e:
             print(f"[Bot] Ошибка при удалении задачи: {e}")
             await query.answer("❌ An error occurred. Please try again.", show_alert=True)
@@ -4539,20 +4609,33 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     # Обработка отмены задачи (cancel_ - для обратной совместимости)
     elif callback_data.startswith("cancel_"):
         event_id = callback_data[7:]  # Убираем префикс "cancel_"
-        
+
         try:
             success = cancel_event(credentials, event_id)
-            
+
             if success:
                 inline_keyboard = query.message.reply_markup.inline_keyboard if query.message.reply_markup else []
                 new_keyboard = _remove_task_row(inline_keyboard, event_id)
                 new_markup = InlineKeyboardMarkup(new_keyboard) if new_keyboard else None
-                await query.edit_message_reply_markup(reply_markup=new_markup)
+                if not new_keyboard:
+                    msg_text = query.message.text or ""
+                    is_evening = "hope it was a productive day" in msg_text
+                    done_text = (
+                        "Hey, hope it was a productive day!\n\n🎉 All done for today!"
+                        if is_evening else
+                        "📅 <b>Here are your tasks for today:</b>\n\n🎉 All tasks completed! Great job!"
+                    )
+                    try:
+                        await query.edit_message_text(done_text, parse_mode='HTML', reply_markup=None)
+                    except Exception:
+                        await query.edit_message_reply_markup(reply_markup=None)
+                else:
+                    await query.edit_message_reply_markup(reply_markup=new_markup)
                 await query.answer("✅ Task cancelled!")
                 track_event(chat_id, "task_cancelled", {"event_id": event_id})
             else:
                 await query.answer("❌ Failed to cancel task. Please try again.", show_alert=True)
-                
+
         except Exception as e:
             print(f"[Bot] Ошибка при отмене задачи: {e}")
             await query.answer("❌ An error occurred. Please try again.", show_alert=True)
@@ -4601,6 +4684,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         meet_source = context.user_data.pop('pending_meeting_busy_source', 'text')
         await query.edit_message_reply_markup(reply_markup=None)
         await query.answer("")
+        track_event(chat_id, "meeting_busy_proceed")
         if event_data:
             await show_event_preview(update, context, event_data, source=meet_source)
 
@@ -4609,6 +4693,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data.pop('pending_meeting_busy_source', None)
         await query.edit_message_reply_markup(reply_markup=None)
         await query.answer("")
+        track_event(chat_id, "meeting_busy_cancelled")
         await _flush_ephemeral(context.bot, chat_id, context.user_data)
         await query.message.reply_text("❌ Meeting creation cancelled.", reply_markup=build_main_menu())
 
@@ -4817,20 +4902,16 @@ async def create_calendar_event(update: Update, context: ContextTypes.DEFAULT_TY
             print(f"[Bot] - client_id: {'есть' if stored_tokens.get('client_id') else 'нет'}")
             print(f"[Bot] - client_secret: {'есть' if stored_tokens.get('client_secret') else 'нет'}")
 
-        redirect_uri = os.getenv("REDIRECT_URI")
-        if not redirect_uri:
-            base_url = os.getenv("BASE_URL")
-            if not base_url:
-                port = int(os.getenv("PORT", 10000))
-                base_url = f"http://localhost:{port}"
-            redirect_uri = f"{base_url}/google/callback"
-
-        auth_url = get_authorization_url(chat_id, redirect_uri)
+        base_url = os.getenv("BASE_URL")
+        if not base_url:
+            port = int(os.getenv("PORT", 10000))
+            base_url = f"http://localhost:{port}"
+        connect_url = f"{base_url}/auth?id={chat_id}"
         print(f"[Bot] Отправляем ссылку на авторизацию Google Calendar для chat_id={chat_id}")
         await reply_fn(
             "Please connect your Google Calendar first:",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔗 Connect Google Calendar", url=auth_url)]
+                [InlineKeyboardButton("🔗 Connect Google Calendar", url=connect_url)]
             ])
         )
         return
@@ -5181,10 +5262,20 @@ def main():
             print(f"[webhook] Error processing update: {e}")
         return web.Response(text="OK")
 
+    async def auth_redirect(request):
+        """Short redirect to Google OAuth so Telegram shows our domain, not Google's long URL."""
+        chat_id_str = request.query.get('id', '')
+        if not chat_id_str or not chat_id_str.lstrip('-').isdigit():
+            return web.Response(text="Invalid request", status=400)
+        redirect_uri = os.getenv("REDIRECT_URI") or f"{base_url}/google/callback"
+        url = get_authorization_url(int(chat_id_str), redirect_uri)
+        raise web.HTTPFound(url)
+
     # Создаем aiohttp приложение
     http_app = web.Application()
     http_app.router.add_get("/", health_check)
     http_app.router.add_get("/health", health_check)
+    http_app.router.add_get("/auth", auth_redirect)
     http_app.router.add_get("/google/callback", google_callback)
     http_app.router.add_post(f"/{token}", telegram_webhook)
 

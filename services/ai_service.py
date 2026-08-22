@@ -352,7 +352,7 @@ JSON structure for SINGLE TASK:
     "is_task": bool,
     "is_meeting": bool,                      // true ONLY when user explicitly mentions "meeting with [person]" or "встреча с [person]" or clear analogues. "meeting at 3pm" without a person is NOT a meeting. false by default.
     "attendee_names": [str],                 // names of people to invite, normalized to English Latin form (e.g. "Никита" → "Nikita", "Александра" → "Alexandra"). Only fill when is_meeting is true, otherwise empty array [].
-    "summary": "brief task title (keep original language if Russian, otherwise English)",
+    "summary": "brief task title (keep the original language of the input)",
     "start_time": "ISO 8601 format (YYYY-MM-DDTHH:MM:SS+00:00 or YYYY-MM-DDTHH:MM:SSZ)",
     "end_time": "ISO 8601 format (YYYY-MM-DDTHH:MM:SS+00:00 or YYYY-MM-DDTHH:MM:SSZ)",
     "description": "detailed task description (can be empty, keep original language)",
@@ -408,12 +408,13 @@ CRITICAL RULES:
 11. summary should be brief (up to 100 characters).
 12. description can be empty string if no additional details.
 13. location can be empty string if not mentioned.
-14. If input text is in Russian, keep summary and description in Russian. Otherwise use English.
+14. Keep summary and description in the same language as the input text. Do not translate.
 15. Be VERY strict: if the message is unclear, ambiguous, doesn't contain a clear action/task, or looks like random text/characters (e.g., "Cheche tv 000000"), set "is_task": false.
 16. A valid task must contain at least one action verb (e.g., "buy", "call", "meet", "go", "do", "make", "send", "write", etc.) or a clear event description.
 17. Random words, numbers, or character sequences without clear meaning are NOT tasks.
 18. "is_meeting" must be true ONLY when the user explicitly names a specific person they want to meet with (e.g., "встреча с Никитой", "поставь встречу с Сашей", "schedule a meeting with John"). A meeting request without a named person (e.g., "meeting at 15:00", "запиши митинг") is NOT is_meeting — set it to false.
 19. "attendee_names" must list the person's name(s) in normalized English Latin form so they can be matched against Google Calendar contacts. Examples: "Никита" → "Nikita", "Сашей" / "Александром" → "Alexander", "Лена" → "Elena", "Женей" → "Zhenya". Only fill this when is_meeting is true.
+20. When "is_meeting" is true, set "summary" to a clean meeting title — NOT a verbatim copy of the user's command. Use the natural equivalent of "Meeting with [Name]" in the input language (e.g. "Meeting with Vadim" for English, "Встреча с Вадим" for Russian, "Reunión con Juan" for Spanish). For multiple people join with the language's natural conjunction. Use the nominative/dictionary form of the name, not the inflected case (e.g. "Вадим" not "Вадимом").
 
 IMPORTANT: Return ONLY valid JSON, no markdown formatting, no backticks, no additional text."""
 
