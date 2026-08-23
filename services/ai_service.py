@@ -168,7 +168,9 @@ CRITICAL RULES:
 - If you see a specific date (e.g., "16 febbraio"), use it for single events
 - For recurring schedules, ignore specific dates and use only day of week
 - **CRITICAL for location**: When extracting location, include ALL location components (room number, building name, etc.) in one field, separated by ", " if needed.
-- **CRITICAL for mixed-activity schedules**: If the image shows multiple different activities (e.g., "Gym" on Monday, "Yoga" on Wednesday, "Swimming" on Friday), each event in the array must carry its own "summary" matching the activity shown for that slot. Do NOT use one activity's name for a different activity's slot."""
+- **CRITICAL for mixed-activity schedules**: If the image shows multiple different activities (e.g., "Gym" on Monday, "Yoga" on Wednesday, "Swimming" on Friday), each event in the array must carry its own "summary" matching the activity shown for that slot. Do NOT use one activity's name for a different activity's slot.
+- **CRITICAL — end_time must NEVER be null**: Always provide a valid ISO 8601 end_time. If the end time is not shown, estimate it: for flights add 2 hours to departure (short-haul) or 8 hours (intercontinental); for events/classes add 1 hour; for appointments add 30 minutes.
+- **BOARDING PASSES / FLIGHT TICKETS**: summary = "Flight [code]: [origin city] → [destination city]"; start_time = departure time (e.g., "Depart 07:30" → use that); end_time = departure + 2h for European routes, + 8h for intercontinental (since arrival isn't shown); location = "[IATA origin] → [IATA destination]"; description = flight number, seat, boarding group, reference code, baggage allowance."""
                 },
                 {
                     "role": "user",
@@ -286,9 +288,40 @@ CRITICAL RULES:
                 print("[AI Service] No valid events found in schedule from image")
                 return None
         
-        # Одиночное событие - возвращаем как есть
+        # Одиночное событие - нормализуем времена
         if isinstance(parsed, dict) and "summary" in parsed:
             parsed["is_recurring_schedule"] = False
+
+            # Normalize start_time
+            start_raw = parsed.get("start_time")
+            if not start_raw or str(start_raw).lower() in ("none", "null", ""):
+                print("[AI Service] Single event from image has no start_time")
+                return None
+            try:
+                start_dt = datetime.fromisoformat(str(start_raw).replace("Z", "+00:00"))
+            except (ValueError, AttributeError) as e:
+                print(f"[AI Service] Could not parse start_time '{start_raw}': {e}")
+                return None
+
+            # Normalize end_time — fallback to start + 1h if missing or null
+            end_raw = parsed.get("end_time")
+            if not end_raw or str(end_raw).lower() in ("none", "null", ""):
+                end_dt = start_dt + timedelta(hours=1)
+                parsed["duration_was_inferred"] = True
+            else:
+                try:
+                    end_dt = datetime.fromisoformat(str(end_raw).replace("Z", "+00:00"))
+                    if end_dt <= start_dt:
+                        end_dt = start_dt + timedelta(hours=1)
+                    parsed["duration_was_inferred"] = False
+                except (ValueError, AttributeError):
+                    end_dt = start_dt + timedelta(hours=1)
+                    parsed["duration_was_inferred"] = True
+
+            parsed["start_time"] = start_dt.isoformat()
+            parsed["end_time"] = end_dt.isoformat()
+            parsed["duration_minutes"] = max(int((end_dt - start_dt).total_seconds() / 60), 1)
+            parsed.setdefault("time_was_inferred", False)
             return parsed
 
         print(f"[AI Service] Image response has no 'summary' key. Full response: {content[:300]}")

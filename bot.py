@@ -94,18 +94,18 @@ def _remove_task_row(inline_keyboard: list, event_id: str) -> list:
     return [row for row in inline_keyboard if not row_has_event(row)]
 
 
-def _build_task_row(event_id: str, label_text: str) -> list:
-    """Returns two keyboard rows: full-width label, then [✅, ➡️, ❌].
-    Telegram splits button widths equally within a row, so putting the label
-    on its own row is the only reliable way to make it visually wider."""
+def _build_task_row(event_id: str, label_text: str, show_done: bool = False) -> list:
+    """Returns two keyboard rows: full-width label, then action buttons.
+    show_done=True adds the ✅ button (evening recap only)."""
     label_text = label_text[:55] if len(label_text) > 55 else label_text
+    action_row = []
+    if show_done:
+        action_row.append(InlineKeyboardButton("✅", callback_data=f"done_{event_id}"))
+    action_row.append(InlineKeyboardButton("➡️", callback_data=f"resch_{event_id}"))
+    action_row.append(InlineKeyboardButton("❌", callback_data=f"del_{event_id}"))
     return [
         [InlineKeyboardButton(label_text, callback_data=f"label_{event_id}")],
-        [
-            InlineKeyboardButton("✅", callback_data=f"done_{event_id}"),
-            InlineKeyboardButton("➡️", callback_data=f"resch_{event_id}"),
-            InlineKeyboardButton("❌", callback_data=f"del_{event_id}"),
-        ],
+        action_row,
     ]
 
 
@@ -857,15 +857,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     track_event(chat_id, "user_start")
     
     # Очищаем любые активные состояния (например, ожидание ответа о неделях)
-    # user_data всегда доступен в telegram.ext контекстах
-    context.user_data.pop('state', None)
-    context.user_data.pop('pending_schedule', None)
-    context.user_data.pop('waiting_for', None)
-    context.user_data.pop('rescheduling_event_id', None)
-    # Meeting flow state
-    for _k in ('pending_meeting_event', 'pending_meeting_source', 'pending_meeting_resolved',
-                'pending_meeting_not_found', 'pending_meeting_remaining', 'pending_meeting_candidates',
-                'pending_meeting_busy_event', 'pending_meeting_busy_source'):
+    for _k in (
+        'state', 'pending_schedule', 'waiting_for', 'rescheduling_event_id',
+        'reschedule_conflict_start',
+        'pending_event_data', 'pending_event_source', 'pending_event_preview',
+        'time_prompt_msg_id', 'duration_prompt_msg_id',
+        'pending_conflict_event', 'pending_conflict_source', 'pending_conflict_ids',
+        'conflict_suggested_start',
+        'pending_meeting_event', 'pending_meeting_source', 'pending_meeting_resolved',
+        'pending_meeting_not_found', 'pending_meeting_remaining', 'pending_meeting_candidates',
+        'pending_meeting_busy_event', 'pending_meeting_busy_source',
+    ):
         context.user_data.pop(_k, None)
     
     # Проверяем, прошел ли онбординг
@@ -881,6 +883,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• Photos of schedules/notes",
             reply_markup=build_main_menu()
         )
+        return
+
+    # Если у пользователя уже есть настройки (timezone/name), но нет GCal токенов —
+    # это повторное подключение после disconnect, пропускаем онбординг и идём сразу к GCal
+    existing_tz = get_user_timezone(chat_id)
+    existing_tokens = get_google_tokens(chat_id)
+    if existing_tz and not existing_tokens:
+        await finish_onboarding(update, context)
         return
     
     # Шаг 1: Приветственное сообщение
@@ -1110,7 +1120,8 @@ def build_edit_menu_buttons() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("✏️ Name", callback_data="edit_title")],
         [InlineKeyboardButton("🕐 Time", callback_data="edit_time")],
         [InlineKeyboardButton("📍 Location", callback_data="edit_location")],
-        [InlineKeyboardButton("❌ Cancel", callback_data="cancel_edit")]
+        [InlineKeyboardButton("↩️ Back", callback_data="cancel_edit"),
+         InlineKeyboardButton("🚫 Cancel task", callback_data="cancel_task_from_edit")],
     ])
 
 
@@ -1807,6 +1818,22 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             context.user_data.pop('reschedule_conflict_start', None)
         return
 
+    elif waiting_for == 'meeting_attendee_pick':
+        # User typed text instead of pressing a disambiguation button — remind them
+        await update.message.reply_text(
+            "👆 Please tap one of the buttons above to select the person.",
+            reply_markup=build_main_menu()
+        )
+        return
+
+    elif waiting_for == 'event_edit_choice':
+        # User typed text instead of pressing an edit button — remind them
+        await update.message.reply_text(
+            "👆 Please tap one of the edit buttons above.",
+            reply_markup=build_main_menu()
+        )
+        return
+
     elif waiting_for == 'task_time':
         # User is answering the "when?" question for a task with no specified time
         if text.strip().lower() in ("cancel", "отмена", "отменить"):
@@ -1830,6 +1857,14 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         combined = f"{pending_event.get('summary', 'task')} at {text}"
         reparsed = await parse_with_ai(combined, tz, source_language)
 
+        if reparsed and reparsed.get('is_recurring_schedule'):
+            await update.message.reply_text(
+                "❌ Please give a single date/time, not a recurring schedule.\n"
+                "Examples: <b>14:00</b>, <b>Mon 14:00</b>, <b>tomorrow 15:30</b>",
+                parse_mode='HTML'
+            )
+            return
+
         if not reparsed or bool(reparsed.get('time_was_inferred', True)):
             await update.message.reply_text(
                 "❌ Couldn't understand the time. Please try again.\n"
@@ -1838,7 +1873,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             return
 
-        # Update times in pending event, keep the rest (summary, location, etc.)
+        # Update times in pending event, keep the rest (summary, location, attendees, etc.)
         pending_event['start_time'] = reparsed['start_time']
         pending_event['end_time'] = reparsed['end_time']
         pending_event['duration_minutes'] = reparsed['duration_minutes']
@@ -1854,6 +1889,11 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 await context.bot.delete_message(chat_id=chat_id, message_id=time_msg_id)
             except Exception:
                 pass
+
+        # If this was a meeting, re-enter meeting flow now that time is known
+        if pending_event.get('is_meeting') and pending_event.get('attendee_names'):
+            await _handle_meeting_flow(update, context, pending_event, source=pending_source)
+            return
 
         # Now check duration (same logic as process_task)
         duration_inferred = bool(pending_event.get('duration_was_inferred', True))
@@ -2609,6 +2649,11 @@ async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_
 
     # Only handle image documents
     if not mime.startswith("image/"):
+        await update.message.reply_text(
+            "📎 I can only read image files (JPG, PNG, HEIC) to import tasks.\n"
+            "PDFs and other formats are not supported.",
+            reply_markup=build_main_menu()
+        )
         return
 
     chat_id = update.effective_chat.id
@@ -3394,12 +3439,7 @@ async def process_task(update: Update, context: ContextTypes.DEFAULT_TYPE, text:
             "has_location": bool(ai_parsed.get("location"))
         })
 
-        # Meeting-with-person flow (intercepts normal preview when AI detected meeting intent)
-        if ai_parsed.get('is_meeting') and ai_parsed.get('attendee_names'):
-            await _handle_meeting_flow(update, context, ai_parsed, source)
-            return
-
-        # Check if time was inferred (user didn't specify any time/date)
+        # Check if time was inferred FIRST — ask before meeting flow (meeting with no time)
         if bool(ai_parsed.get("time_was_inferred", False)):
             context.user_data['waiting_for'] = 'task_time'
             context.user_data['pending_event_data'] = ai_parsed
@@ -3412,6 +3452,11 @@ async def process_task(update: Update, context: ContextTypes.DEFAULT_TYPE, text:
                 reply_markup=cancel_kb
             )
             context.user_data['time_prompt_msg_id'] = time_msg.message_id
+            return
+
+        # Meeting-with-person flow (time is known at this point)
+        if ai_parsed.get('is_meeting') and ai_parsed.get('attendee_names'):
+            await _handle_meeting_flow(update, context, ai_parsed, source)
             return
 
         # Check if duration was inferred (not explicitly specified by user)
@@ -3934,11 +3979,15 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             await query.edit_message_text("❌ Schedule data not found. Please try again.")
             return
         
-        # Очищаем временные данные предпросмотра
+        # Очищаем временные данные предпросмотра и убираем кнопки со старого сообщения
         context.user_data.pop('pending_schedule_preview', None)
         context.user_data.pop('pending_event_source', None)
         context.user_data.pop('waiting_for', None)
-        
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
         # Вызываем обработку импорта расписания (которая спросит о количестве недель)
         await handle_schedule_import(update, context, schedule_data, source=source)
         track_event(chat_id, "schedule_preview_confirmed", {"source": source})
@@ -3947,10 +3996,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     elif callback_data == "schedule_cancel":
         await query.answer("")  # тихий ответ
         track_event(chat_id, "schedule_preview_cancelled")
-        # Очищаем сохраненные данные
-        context.user_data.pop('pending_schedule_preview', None)
-        context.user_data.pop('pending_event_source', None)
-        context.user_data.pop('waiting_for', None)
+        _clear_schedule_import_state(context)
 
         await query.edit_message_text("❌ Schedule import cancelled.")
         await query.message.reply_text("What would you like to do next?", reply_markup=build_main_menu())
@@ -4052,6 +4098,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             )
 
         track_event(chat_id, "schedule_imported", {"events_created": events_created})
+        await query.message.reply_text("What would you like to do next?", reply_markup=build_main_menu())
         return
 
     # Обработка редактирования события
@@ -4098,6 +4145,14 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             context.user_data['waiting_for'] = 'event_confirmation'
         else:
             await query.edit_message_text("Event data not found.")
+        return
+
+    elif callback_data == "cancel_task_from_edit":
+        await query.answer("")
+        track_event(chat_id, "task_cancelled_from_edit")
+        _clear_event_preview_state(context)
+        await query.edit_message_text("🚫 Task cancelled.")
+        await query.message.reply_text("What would you like to do next?", reply_markup=build_main_menu())
         return
 
     elif callback_data == "conflict_replace":
@@ -4490,7 +4545,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                                 except Exception:
                                     pass
                             label_text = f"{time_str} {evt_summary}" if time_str else evt_summary
-                            new_keyboard.extend(_build_task_row(event_id_item, label_text))
+                            new_keyboard.extend(_build_task_row(event_id_item, label_text, show_done=is_evening_recap))
                     
                     new_markup = InlineKeyboardMarkup(new_keyboard) if new_keyboard else None
                     await query.edit_message_text(
