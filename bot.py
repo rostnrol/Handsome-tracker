@@ -4720,13 +4720,14 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 if not new_keyboard:
                     msg_text = query.message.text or ""
                     is_evening = "hope it was a productive day" in msg_text
-                    done_text = (
-                        "Hey, hope it was a productive day!\n\n🎉 All done for today!"
-                        if is_evening else
-                        "📅 <b>Here are your tasks for today:</b>\n\n🎉 All tasks completed! Great job!"
-                    )
                     try:
-                        await query.edit_message_text(done_text, parse_mode='HTML', reply_markup=None)
+                        if is_evening:
+                            await query.edit_message_text(
+                                "Hey, hope it was a productive day!\n\n🎉 All done for today!",
+                                reply_markup=None
+                            )
+                        else:
+                            await query.edit_message_reply_markup(reply_markup=None)
                     except Exception:
                         await query.edit_message_reply_markup(reply_markup=None)
                 else:
@@ -4766,13 +4767,14 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 if not new_keyboard:
                     msg_text = query.message.text or ""
                     is_evening = "hope it was a productive day" in msg_text
-                    done_text = (
-                        "Hey, hope it was a productive day!\n\n🎉 All done for today!"
-                        if is_evening else
-                        "📅 <b>Here are your tasks for today:</b>\n\n🎉 All tasks completed! Great job!"
-                    )
                     try:
-                        await query.edit_message_text(done_text, parse_mode='HTML', reply_markup=None)
+                        if is_evening:
+                            await query.edit_message_text(
+                                "Hey, hope it was a productive day!\n\n🎉 All done for today!",
+                                reply_markup=None
+                            )
+                        else:
+                            await query.edit_message_reply_markup(reply_markup=None)
                     except Exception:
                         await query.edit_message_reply_markup(reply_markup=None)
                 else:
