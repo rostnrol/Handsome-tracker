@@ -1807,6 +1807,81 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             context.user_data.pop('reschedule_conflict_start', None)
         return
 
+    elif waiting_for == 'task_time':
+        # User is answering the "when?" question for a task with no specified time
+        if text.strip().lower() in ("cancel", "отмена", "отменить"):
+            context.user_data.pop('waiting_for', None)
+            context.user_data.pop('pending_event_data', None)
+            context.user_data.pop('pending_event_source', None)
+            context.user_data.pop('time_prompt_msg_id', None)
+            await update.message.reply_text("❌ Task creation cancelled.", reply_markup=build_main_menu())
+            return
+
+        pending_event = context.user_data.get('pending_event_data')
+        pending_source = context.user_data.get('pending_event_source', 'text')
+        if not pending_event:
+            await update.message.reply_text("Sorry, I lost the task details. Please send the task again.", reply_markup=build_main_menu())
+            context.user_data.pop('waiting_for', None)
+            return
+
+        # Re-parse using "{summary} at {user_time_input}" so AI applies all time rules
+        tz = get_user_timezone(chat_id) or DEFAULT_TZ
+        source_language = "ru" if any('Ѐ' <= c <= 'ӿ' for c in text) else "en"
+        combined = f"{pending_event.get('summary', 'task')} at {text}"
+        reparsed = await parse_with_ai(combined, tz, source_language)
+
+        if not reparsed or bool(reparsed.get('time_was_inferred', True)):
+            await update.message.reply_text(
+                "❌ Couldn't understand the time. Please try again.\n"
+                "Examples: <b>14:00</b>, <b>Mon 14:00</b>, <b>tomorrow 15:30</b>",
+                parse_mode='HTML'
+            )
+            return
+
+        # Update times in pending event, keep the rest (summary, location, etc.)
+        pending_event['start_time'] = reparsed['start_time']
+        pending_event['end_time'] = reparsed['end_time']
+        pending_event['duration_minutes'] = reparsed['duration_minutes']
+        pending_event['time_was_inferred'] = False
+        pending_event['duration_was_inferred'] = reparsed.get('duration_was_inferred', True)
+
+        context.user_data.pop('waiting_for', None)
+        context.user_data.pop('pending_event_data', None)
+        context.user_data.pop('pending_event_source', None)
+        time_msg_id = context.user_data.pop('time_prompt_msg_id', None)
+        if time_msg_id:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=time_msg_id)
+            except Exception:
+                pass
+
+        # Now check duration (same logic as process_task)
+        duration_inferred = bool(pending_event.get('duration_was_inferred', True))
+        if duration_inferred:
+            use_default = get_use_default_duration(chat_id)
+            if use_default:
+                default_duration = get_default_task_duration(chat_id)
+                start_dt = datetime.fromisoformat(pending_event['start_time'].replace('Z', '+00:00'))
+                end_dt = start_dt + timedelta(minutes=default_duration)
+                pending_event['end_time'] = end_dt.isoformat()
+                pending_event['duration_minutes'] = default_duration
+                pending_event['duration_was_inferred'] = False
+                await show_event_preview(update, context, pending_event, source=pending_source)
+            else:
+                context.user_data['waiting_for'] = 'task_duration'
+                context.user_data['pending_event_data'] = pending_event
+                context.user_data['pending_event_source'] = pending_source
+                cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="cancel_task_duration")]])
+                dur_msg = await update.message.reply_text(
+                    "⏱ Please specify how long this task will take.\n\nExamples: <b>30</b>, <b>30 min</b>, <b>1h</b>, <b>1:30</b>",
+                    parse_mode='HTML',
+                    reply_markup=cancel_kb
+                )
+                context.user_data['duration_prompt_msg_id'] = dur_msg.message_id
+        else:
+            await show_event_preview(update, context, pending_event, source=pending_source)
+        return
+
     elif waiting_for == 'task_duration':
         # Пользователь отвечает на вопрос о длительности задачи
         if text.strip().lower() in ("cancel", "отмена", "отменить"):
@@ -3324,9 +3399,24 @@ async def process_task(update: Update, context: ContextTypes.DEFAULT_TYPE, text:
             await _handle_meeting_flow(update, context, ai_parsed, source)
             return
 
+        # Check if time was inferred (user didn't specify any time/date)
+        if bool(ai_parsed.get("time_was_inferred", False)):
+            context.user_data['waiting_for'] = 'task_time'
+            context.user_data['pending_event_data'] = ai_parsed
+            context.user_data['pending_event_source'] = source
+            cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="cancel_task_duration")]])
+            time_msg = await update.message.reply_text(
+                f"🕐 When should I schedule <b>{summary}</b>?\n\n"
+                "Examples: <b>14:00</b>, <b>Mon 14:00</b>, <b>tomorrow 15:30</b>",
+                parse_mode='HTML',
+                reply_markup=cancel_kb
+            )
+            context.user_data['time_prompt_msg_id'] = time_msg.message_id
+            return
+
         # Check if duration was inferred (not explicitly specified by user)
         duration_inferred = bool(ai_parsed.get("duration_was_inferred", True))
-        
+
         if duration_inferred:
             # Duration was not specified by user
             use_default = get_use_default_duration(chat_id)
@@ -4164,6 +4254,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data.pop('pending_event_data', None)
         context.user_data.pop('pending_event_source', None)
         context.user_data.pop('duration_prompt_msg_id', None)
+        context.user_data.pop('time_prompt_msg_id', None)
         await query.edit_message_text("❌ Task creation cancelled.")
         await query.message.reply_text("What would you like to do next?", reply_markup=build_main_menu())
         return

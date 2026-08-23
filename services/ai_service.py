@@ -358,7 +358,8 @@ JSON structure for SINGLE TASK:
     "description": "detailed task description (can be empty, keep original language)",
     "location": "location if mentioned (can be empty string)",
     "duration_minutes": integer,              // total duration in minutes (end_time - start_time)
-    "duration_was_inferred": bool            // true if user did NOT explicitly specify duration and you used a default guess
+    "duration_was_inferred": bool,           // true if user did NOT explicitly specify duration and you used a default guess
+    "time_was_inferred": bool                // true if user did NOT specify any time, day of week, or date (e.g. "do yoga", "buy milk"). false if user explicitly mentioned a time ("at 14:00"), day ("Wed"), date ("tomorrow", "Aug 24"), etc.
 }
 
 JSON structure for RECURRING WEEKLY SCHEDULE:
@@ -404,6 +405,7 @@ CRITICAL RULES:
 7. Only schedule for tomorrow/future if the computed time would be in the past relative to NOW.
 8. For single tasks: All times must be in the USER'S LOCAL TIMEZONE with the correct numeric UTC offset (e.g., "2026-03-10T14:00:00+03:00"). DO NOT convert times to pure UTC yourself; keep the local offset.
 9. Default duration is 30 minutes (end_time = start_time + 30 minutes) ONLY when the user did NOT explicitly specify duration. In that case set "duration_was_inferred": true. If the user clearly specifies duration (e.g., "for 2 hours", "1.5h", "for 45 minutes"), compute end_time accordingly and set "duration_was_inferred": false.
+9a. Set "time_was_inferred": true when user did NOT specify any time, day of week, or date — just the task name (e.g., "do yoga", "buy milk", "call mom"). Set "time_was_inferred": false when the user explicitly mentioned a time ("at 14:00", "21:30"), a day of week ("Wed", "Monday"), or a relative date ("today", "tomorrow", "next week"). Even when time_was_inferred is true, still return a valid start_time (use TODAY at 09:00 per rule 4).
 10. Always set "duration_minutes" = total duration in minutes (end_time - start_time), even if the user did not specify duration explicitly.
 11. summary should be brief (up to 100 characters).
 12. description can be empty string if no additional details.
@@ -672,6 +674,11 @@ Return JSON with task information."""
                 parsed_data["duration_was_inferred"] = bool(parsed_data["duration_was_inferred"])
             else:
                 parsed_data["duration_was_inferred"] = True
+
+            if "time_was_inferred" in parsed_data:
+                parsed_data["time_was_inferred"] = bool(parsed_data["time_was_inferred"])
+            else:
+                parsed_data["time_was_inferred"] = False
             
             # Сохраняем нормализованные времена в ISO формате (local timezone with offset)
             parsed_data["start_time"] = start_dt.isoformat()
