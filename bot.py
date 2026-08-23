@@ -867,6 +867,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'pending_meeting_event', 'pending_meeting_source', 'pending_meeting_resolved',
         'pending_meeting_not_found', 'pending_meeting_remaining', 'pending_meeting_candidates',
         'pending_meeting_busy_event', 'pending_meeting_busy_source',
+        'pending_schedule_preview',
+        'sched_edit_msg_id', 'sched_edit_slot_index', 'sched_prompt_msg_id',
     ):
         context.user_data.pop(_k, None)
     
@@ -1114,6 +1116,72 @@ def build_schedule_buttons() -> InlineKeyboardMarkup:
     ]])
 
 
+def build_schedule_edit_buttons(events: list) -> InlineKeyboardMarkup:
+    """Build schedule preview keyboard with per-event edit/delete buttons."""
+    rows = [
+        [
+            InlineKeyboardButton("✅ Import Schedule", callback_data="schedule_confirm"),
+            InlineKeyboardButton("❌ Cancel", callback_data="schedule_cancel"),
+        ],
+        [
+            InlineKeyboardButton("✏️ Name", callback_data="sched_edit_name"),
+            InlineKeyboardButton("➕ Add slot", callback_data="sched_add_slot"),
+        ],
+    ]
+    for i, ev in enumerate(events[:10]):  # max 10 slots in keyboard
+        day = ev.get("day_of_week", "?")[:3]  # Mon, Tue…
+        start = ev.get("start_time", "")
+        end = ev.get("end_time", "")
+        label = f"🕐 {day} {start}–{end}"
+        rows.append([
+            InlineKeyboardButton(label, callback_data=f"sched_edit_t_{i}"),
+            InlineKeyboardButton("🗑️", callback_data=f"sched_del_{i}"),
+        ])
+    return InlineKeyboardMarkup(rows)
+
+
+def _parse_time_range(text: str):
+    """Parse 'HH:MM - HH:MM' or 'HH:MM-HH:MM'. Returns normalized (start, end) or raises ValueError."""
+    import re as _re
+    m = _re.search(r'(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2}:\d{2})', text)
+    if not m:
+        raise ValueError("No time range found")
+    start_str, end_str = m.group(1), m.group(2)
+    sh, sm = map(int, start_str.split(':'))
+    eh, em = map(int, end_str.split(':'))
+    if sh > 23 or sm > 59:
+        raise ValueError(f"Invalid start time: {start_str}")
+    if eh > 23 or em > 59:
+        raise ValueError(f"Invalid end time: {end_str}")
+    if sh * 60 + sm >= eh * 60 + em:
+        raise ValueError("Start time must be before end time")
+    return f"{sh:02d}:{sm:02d}", f"{eh:02d}:{em:02d}"
+
+
+def _parse_day_name(text: str) -> str:
+    """Extract and normalize day name from text (EN/RU). Returns 'Monday' etc. or raises ValueError."""
+    import re as _re
+    mapping = {
+        "monday": "Monday", "tuesday": "Tuesday", "wednesday": "Wednesday",
+        "thursday": "Thursday", "friday": "Friday", "saturday": "Saturday", "sunday": "Sunday",
+        "mon": "Monday", "tue": "Tuesday", "wed": "Wednesday", "thu": "Thursday",
+        "fri": "Friday", "sat": "Saturday", "sun": "Sunday",
+        "понедельник": "Monday", "вторник": "Tuesday", "среда": "Wednesday",
+        "четверг": "Thursday", "пятница": "Friday", "суббота": "Saturday", "воскресенье": "Sunday",
+        "пн": "Monday", "вт": "Tuesday", "ср": "Wednesday", "чт": "Thursday",
+        "пт": "Friday", "сб": "Saturday", "вс": "Sunday",
+    }
+    lower = text.lower()
+    for key in sorted(mapping, key=len, reverse=True):
+        if key.isascii():
+            if _re.search(r'\b' + _re.escape(key) + r'\b', lower):
+                return mapping[key]
+        else:
+            if key in lower:
+                return mapping[key]
+    raise ValueError("Day name not found")
+
+
 def build_edit_menu_buttons() -> InlineKeyboardMarkup:
     """Build edit menu buttons"""
     return InlineKeyboardMarkup([
@@ -1149,6 +1217,9 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         context.user_data.pop('uncertain_name_prompt_msg_id', None)
         context.user_data.pop('uncertain_time_prompt_msg_id', None)
         context.user_data.pop('duration_prompt_msg_id', None)
+        context.user_data.pop('sched_edit_msg_id', None)
+        context.user_data.pop('sched_edit_slot_index', None)
+        context.user_data.pop('sched_prompt_msg_id', None)
         # Meeting flow state (disambiguation buttons become stale after navigation)
         for _k in ('pending_meeting_event', 'pending_meeting_source', 'pending_meeting_resolved',
                     'pending_meeting_not_found', 'pending_meeting_remaining', 'pending_meeting_candidates',
@@ -1989,6 +2060,99 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             context.user_data.pop('pending_event_source', None)
         return
     
+    # ---- Schedule preview text-input states ----
+    elif waiting_for == 'sched_name':
+        schedule_data = context.user_data.get('pending_schedule_preview')
+        if not schedule_data:
+            await update.message.reply_text("❌ No schedule in progress. Please start over.", reply_markup=build_main_menu())
+            context.user_data.pop('waiting_for', None)
+            return
+        new_name = text.strip()[:100]
+        if not new_name:
+            await update.message.reply_text("❌ Name cannot be empty. Please try again.")
+            return
+        for ev in schedule_data.get("events", []):
+            ev["summary"] = new_name
+        context.user_data['pending_schedule_preview'] = schedule_data
+        context.user_data.pop('waiting_for', None)
+        track_event(chat_id, "schedule_name_edited")
+        await _sched_finish_edit(context, chat_id, schedule_data, update.message)
+        return
+
+    elif waiting_for == 'sched_time':
+        schedule_data = context.user_data.get('pending_schedule_preview')
+        slot_idx = context.user_data.get('sched_edit_slot_index')
+        if not schedule_data or slot_idx is None:
+            await update.message.reply_text("❌ No schedule in progress. Please start over.", reply_markup=build_main_menu())
+            context.user_data.pop('waiting_for', None)
+            return
+        try:
+            start_str, end_str = _parse_time_range(text)
+        except ValueError as e:
+            hint = str(e) if "before" in str(e) else ""
+            msg = "❌ " + hint if hint else "❌ Couldn't parse the time range."
+            await update.message.reply_text(
+                f"{msg}\nFormat: <b>HH:MM - HH:MM</b>, e.g. <b>09:00 - 10:30</b>",
+                parse_mode='HTML'
+            )
+            return
+        events = schedule_data.get("events", [])
+        if slot_idx >= len(events):
+            context.user_data.pop('waiting_for', None)
+            context.user_data.pop('sched_edit_slot_index', None)
+            return
+        events[slot_idx]["start_time"] = start_str
+        events[slot_idx]["end_time"] = end_str
+        schedule_data["events"] = events
+        context.user_data['pending_schedule_preview'] = schedule_data
+        context.user_data.pop('waiting_for', None)
+        context.user_data.pop('sched_edit_slot_index', None)
+        track_event(chat_id, "schedule_slot_time_edited")
+        await _sched_finish_edit(context, chat_id, schedule_data, update.message)
+        return
+
+    elif waiting_for == 'sched_add_slot':
+        schedule_data = context.user_data.get('pending_schedule_preview')
+        if not schedule_data:
+            await update.message.reply_text("❌ No schedule in progress. Please start over.", reply_markup=build_main_menu())
+            context.user_data.pop('waiting_for', None)
+            return
+        try:
+            day_name = _parse_day_name(text)
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Couldn't find a day name. Example: <b>Mon 09:00-10:30</b>",
+                parse_mode='HTML'
+            )
+            return
+        try:
+            start_str, end_str = _parse_time_range(text)
+        except ValueError as e:
+            hint = str(e) if "before" in str(e) else ""
+            msg = "❌ " + hint if hint else "❌ Couldn't parse the time range."
+            await update.message.reply_text(
+                f"{msg}\nExample: <b>Mon 09:00-10:30</b>",
+                parse_mode='HTML'
+            )
+            return
+        events = schedule_data.get("events", [])
+        existing_summary = events[0].get("summary", "Event") if events else "Event"
+        existing_location = events[0].get("location", "") if events else ""
+        new_slot = {
+            "day_of_week": day_name,
+            "start_time": start_str,
+            "end_time": end_str,
+            "summary": existing_summary,
+            "location": existing_location,
+        }
+        events.append(new_slot)
+        schedule_data["events"] = events
+        context.user_data['pending_schedule_preview'] = schedule_data
+        context.user_data.pop('waiting_for', None)
+        track_event(chat_id, "schedule_slot_added")
+        await _sched_finish_edit(context, chat_id, schedule_data, update.message)
+        return
+
     # Обработка редактирования события при подтверждении
     elif waiting_for == 'edit_event_title':
         pending_event = context.user_data.get('pending_event_preview')
@@ -2548,8 +2712,59 @@ async def show_schedule_preview(update: Update, context: ContextTypes.DEFAULT_TY
     await update.effective_message.reply_text(
         preview_text,
         parse_mode='HTML',
-        reply_markup=build_schedule_buttons()
+        reply_markup=build_schedule_edit_buttons(events)
     )
+
+
+async def _refresh_schedule_preview(query, context: ContextTypes.DEFAULT_TYPE):
+    """Re-render the schedule preview message in place after an edit."""
+    schedule_data = context.user_data.get('pending_schedule_preview', {})
+    events = schedule_data.get("events", [])
+    preview_text = format_schedule_preview(events)
+    try:
+        await query.edit_message_text(
+            preview_text,
+            parse_mode='HTML',
+            reply_markup=build_schedule_edit_buttons(events),
+        )
+    except Exception:
+        pass
+
+
+async def _sched_finish_edit(context: ContextTypes.DEFAULT_TYPE, chat_id: int, schedule_data: dict, user_message):
+    """After a successful sched state edit: delete the prompt, refresh the preview."""
+    # Delete the prompt message (the bot's "Enter new name / time / slot" message)
+    prompt_msg_id = context.user_data.pop('sched_prompt_msg_id', None)
+    if prompt_msg_id:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=prompt_msg_id)
+        except Exception:
+            pass
+    # Delete the user's own input message to keep chat clean
+    try:
+        await user_message.delete()
+    except Exception:
+        pass
+    # Update the preview message
+    edit_msg_id = context.user_data.pop('sched_edit_msg_id', None)
+    if edit_msg_id:
+        events = schedule_data.get("events", [])
+        preview_text = format_schedule_preview(events)
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=edit_msg_id,
+                text=preview_text,
+                parse_mode='HTML',
+                reply_markup=build_schedule_edit_buttons(events),
+            )
+        except Exception:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=preview_text,
+                parse_mode='HTML',
+                reply_markup=build_schedule_edit_buttons(events),
+            )
 
 
 async def _process_photo_file(update: Update, context: ContextTypes.DEFAULT_TYPE, file_id: str, suffix: str = '.jpg'):
@@ -3965,6 +4180,104 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             reply_markup=build_edit_menu_buttons()
         )
         context.user_data['waiting_for'] = 'event_edit_choice'
+        return
+
+    # ---- Schedule preview editing ----
+    elif callback_data == "sched_edit_name":
+        await query.answer("")
+        schedule_data = context.user_data.get('pending_schedule_preview')
+        if not schedule_data:
+            await query.answer("No schedule data.", show_alert=True)
+            return
+        events = schedule_data.get("events", [])
+        current_name = events[0].get("summary", "Schedule") if events else "Schedule"
+        context.user_data['waiting_for'] = 'sched_name'
+        context.user_data['sched_edit_msg_id'] = query.message.message_id
+        cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="sched_cancel_edit")]])
+        prompt = await query.message.reply_text(
+            f"✏️ Enter a new name for the schedule (current: <b>{current_name}</b>):",
+            parse_mode='HTML',
+            reply_markup=cancel_kb,
+        )
+        context.user_data['sched_prompt_msg_id'] = prompt.message_id
+        return
+
+    elif callback_data == "sched_cancel_edit":
+        await query.answer("")
+        context.user_data.pop('waiting_for', None)
+        context.user_data.pop('sched_edit_msg_id', None)
+        context.user_data.pop('sched_edit_slot_index', None)
+        context.user_data.pop('sched_prompt_msg_id', None)
+        await query.edit_message_text("↩️ Cancelled.")
+        return
+
+    elif callback_data == "sched_add_slot":
+        await query.answer("")
+        schedule_data = context.user_data.get('pending_schedule_preview')
+        if not schedule_data:
+            await query.answer("No schedule data.", show_alert=True)
+            return
+        context.user_data['waiting_for'] = 'sched_add_slot'
+        context.user_data['sched_edit_msg_id'] = query.message.message_id
+        cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="sched_cancel_edit")]])
+        prompt = await query.message.reply_text(
+            "➕ Enter new slot — day and time range:\n"
+            "Examples: <b>Mon 09:00-10:30</b>, <b>Friday 14:00-15:30</b>",
+            parse_mode='HTML',
+            reply_markup=cancel_kb,
+        )
+        context.user_data['sched_prompt_msg_id'] = prompt.message_id
+        return
+
+    elif callback_data.startswith("sched_edit_t_"):
+        await query.answer("")
+        try:
+            slot_idx = int(callback_data.split("_")[-1])
+        except ValueError:
+            return
+        schedule_data = context.user_data.get('pending_schedule_preview')
+        if not schedule_data:
+            return
+        events = schedule_data.get("events", [])
+        if slot_idx >= len(events):
+            return
+        ev = events[slot_idx]
+        context.user_data['waiting_for'] = 'sched_time'
+        context.user_data['sched_edit_slot_index'] = slot_idx
+        context.user_data['sched_edit_msg_id'] = query.message.message_id
+        cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="sched_cancel_edit")]])
+        prompt = await query.message.reply_text(
+            f"🕐 New time for <b>{ev.get('day_of_week', '?')}</b> "
+            f"(current: {ev.get('start_time', '?')}–{ev.get('end_time', '?')}):\n"
+            "Format: <b>HH:MM - HH:MM</b>",
+            parse_mode='HTML',
+            reply_markup=cancel_kb,
+        )
+        context.user_data['sched_prompt_msg_id'] = prompt.message_id
+        return
+
+    elif callback_data.startswith("sched_del_"):
+        await query.answer("")
+        try:
+            slot_idx = int(callback_data.split("_")[-1])
+        except ValueError:
+            return
+        schedule_data = context.user_data.get('pending_schedule_preview')
+        if not schedule_data:
+            return
+        events = schedule_data.get("events", [])
+        if slot_idx >= len(events):
+            return
+        deleted_ev = events.pop(slot_idx)
+        track_event(chat_id, "schedule_slot_deleted", {"day": deleted_ev.get("day_of_week")})
+        if not events:
+            context.user_data.pop('pending_schedule_preview', None)
+            await query.edit_message_text("🗑️ All slots removed. Schedule import cancelled.")
+            await query.message.reply_text("What would you like to do next?", reply_markup=build_main_menu())
+            return
+        schedule_data["events"] = events
+        context.user_data['pending_schedule_preview'] = schedule_data
+        await _refresh_schedule_preview(query, context)
         return
 
     # Обработка подтверждения расписания из предпросмотра
