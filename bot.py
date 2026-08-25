@@ -5511,6 +5511,13 @@ async def _run_bot_webhook(app: Application, http_app, port: int, base_url: str,
         await app.stop()
         await runner.cleanup()
         await app.shutdown()
+        # Flush any buffered Amplitude events before process exits
+        from services.analytics_service import amplitude_client as _amp
+        if _amp:
+            try:
+                _amp.shutdown()
+            except Exception:
+                pass
 
 
 def main():

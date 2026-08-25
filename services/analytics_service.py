@@ -16,12 +16,21 @@ def init_amplitude():
     api_key = os.getenv("AMPLITUDE_API_KEY")
     if api_key:
         try:
-            # Используем EU зону для сервера, так как проект находится в Европе
-            amplitude_client = Amplitude(api_key, configuration=Config(server_zone='EU'))
-            print(f"[Analytics] Amplitude клиент успешно инициализирован для EU зоны (ключ: {api_key[:10]}...)")
+            server_zone = os.getenv("AMPLITUDE_SERVER_ZONE", "US").upper()
+            zone = 'EU' if server_zone == 'EU' else None
+            cfg = Config(
+                flush_queue_size=1,       # отправляем каждое событие сразу, не ждём батч
+                flush_interval_millis=500,
+                server_zone=zone,
+            ) if zone else Config(
+                flush_queue_size=1,
+                flush_interval_millis=500,
+            )
+            amplitude_client = Amplitude(api_key, configuration=cfg)
+            zone_label = server_zone
+            print(f"[Analytics] Amplitude инициализирован, зона={zone_label} (ключ: {api_key[:10]}...)")
         except Exception as e:
-            print(f"[Analytics] ОШИБКА при инициализации Amplitude клиента: {e}")
-            print(f"[Analytics] Проверьте правильность AMPLITUDE_API_KEY в настройках Render")
+            print(f"[Analytics] ОШИБКА при инициализации Amplitude: {e}")
             amplitude_client = None
     else:
         print("[Analytics] AMPLITUDE_API_KEY не установлен, аналитика отключена")
