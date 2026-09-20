@@ -435,6 +435,9 @@ CRITICAL RULES:
     Example: today is Friday, user says "wed 10:30" → schedule for next Wednesday
     Example: today is Wednesday 09:00, user says "wed 10:30" → schedule for today (Wednesday) at 10:30
     Example: today is Wednesday 11:00, user says "wed 10:30" → 10:30 already passed → schedule for NEXT Wednesday
+6b. **DAY OF WEEK + EXPLICIT DATE CONFLICT**: When the user provides BOTH a weekday name AND an explicit calendar date (a number + month, e.g. "Sunday September 20", "воскресенье 20 сентября", "Saturday Oct 5"), the explicit date (number + month) takes absolute priority. Use that exact date. Do NOT apply rule 6a's "next upcoming weekday" logic. The weekday name is just a verbal confirmation of the date, not a selector.
+    Example: "Sunday September 20" → use September 20 of the current or next year, NOT the nearest Sunday
+    Example: "воскресенье 20 сентября в 13:00" → use Sep 20 at 13:00, NOT the nearest Sunday
 7. Only schedule for tomorrow/future if the computed time would be in the past relative to NOW.
 8. For single tasks: All times must be in the USER'S LOCAL TIMEZONE with the correct numeric UTC offset (e.g., "2026-03-10T14:00:00+03:00"). DO NOT convert times to pure UTC yourself; keep the local offset.
 9. Default duration is 30 minutes (end_time = start_time + 30 minutes) ONLY when the user did NOT explicitly specify duration. In that case set "duration_was_inferred": true. If the user clearly specifies duration (e.g., "for 2 hours", "1.5h", "for 45 minutes"), compute end_time accordingly and set "duration_was_inferred": false.

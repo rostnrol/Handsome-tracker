@@ -540,6 +540,14 @@ def init_db():
         cur.execute("ALTER TABLE settings ADD COLUMN subscription_expires_at TEXT")
     except sqlite3.OperationalError:
         pass
+    try:
+        cur.execute("ALTER TABLE settings ADD COLUMN reminder_enabled INTEGER NOT NULL DEFAULT 1")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cur.execute("ALTER TABLE settings ADD COLUMN reminder_minutes INTEGER NOT NULL DEFAULT 30")
+    except sqlite3.OperationalError:
+        pass
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS app_lock (
@@ -739,6 +747,34 @@ def set_default_duration_settings(chat_id: int, use_default: bool, duration_minu
             default_task_duration=excluded.default_task_duration
         """,
         (chat_id, int(use_default), duration_minutes, chat_id),
+    )
+    con.commit()
+    con.close()
+
+
+def get_reminder_settings(chat_id: int) -> tuple:
+    """Returns (enabled: bool, minutes: int)"""
+    con = get_con()
+    cur = con.cursor()
+    cur.execute("SELECT reminder_enabled, reminder_minutes FROM settings WHERE chat_id=?", (chat_id,))
+    row = cur.fetchone()
+    con.close()
+    if row:
+        return bool(row[0]), int(row[1]) if row[1] else 30
+    return True, 30
+
+
+def set_reminder_settings(chat_id: int, enabled: bool, minutes: int):
+    con = get_con()
+    con.execute(
+        """
+        INSERT INTO settings (chat_id, reminder_enabled, reminder_minutes, onboard_done)
+        VALUES (?, ?, ?, COALESCE((SELECT onboard_done FROM settings WHERE chat_id=?), 0))
+        ON CONFLICT(chat_id) DO UPDATE SET
+            reminder_enabled=excluded.reminder_enabled,
+            reminder_minutes=excluded.reminder_minutes
+        """,
+        (chat_id, int(enabled), minutes, chat_id),
     )
     con.commit()
     con.close()
@@ -1182,12 +1218,21 @@ def _parse_day_name(text: str) -> str:
     raise ValueError("Day name not found")
 
 
-def build_edit_menu_buttons() -> InlineKeyboardMarkup:
+def build_edit_menu_buttons(reminder_minutes: int = None, reminder_enabled: bool = True) -> InlineKeyboardMarkup:
     """Build edit menu buttons"""
+    if reminder_enabled and reminder_minutes is not None:
+        rem_label = f"🔔 Reminder: {reminder_minutes} min"
+    elif not reminder_enabled:
+        rem_label = "🔕 Reminder: off"
+    else:
+        rem_label = "🔔 Reminder"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✏️ Name", callback_data="edit_title")],
-        [InlineKeyboardButton("🕐 Time", callback_data="edit_time")],
-        [InlineKeyboardButton("📍 Location", callback_data="edit_location")],
+        [InlineKeyboardButton("✏️ Name", callback_data="edit_title"),
+         InlineKeyboardButton("📝 Description", callback_data="edit_description")],
+        [InlineKeyboardButton("📅 Date", callback_data="edit_date"),
+         InlineKeyboardButton("🕐 Time", callback_data="edit_time")],
+        [InlineKeyboardButton("📍 Location", callback_data="edit_location"),
+         InlineKeyboardButton(rem_label, callback_data="edit_reminder")],
         [InlineKeyboardButton("↩️ Back", callback_data="cancel_edit"),
          InlineKeyboardButton("🚫 Cancel task", callback_data="cancel_task_from_edit")],
     ])
@@ -1236,6 +1281,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         use_default_dur = get_use_default_duration(chat_id)
         default_dur = get_default_task_duration(chat_id)
+        rem_enabled, rem_minutes = get_reminder_settings(chat_id)
 
         settings_text = f"⚙️ Settings\n\n"
         if user_name:
@@ -1247,6 +1293,10 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             settings_text += f"Task duration: {default_dur} min (default)\n"
         else:
             settings_text += "Task duration: ask each time\n"
+        if rem_enabled:
+            settings_text += f"Reminder: {rem_minutes} min before event\n"
+        else:
+            settings_text += "Reminder: disabled\n"
         settings_text += "\nGoogle Calendar: "
         settings_text += "connected\n\n" if has_calendar else "not connected\n\n"
         settings_text += "Select what you want to change:"
@@ -1257,6 +1307,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             [InlineKeyboardButton("🌅 Morning Time", callback_data="set_morning")],
             [InlineKeyboardButton("🌙 Evening Time", callback_data="set_evening")],
             [InlineKeyboardButton("⏱ Task Duration", callback_data="set_duration")],
+            [InlineKeyboardButton("🔔 Reminder", callback_data="set_reminder")],
         ]
         if has_calendar:
             keyboard_rows.append([InlineKeyboardButton("🔌 Disconnect Google Calendar", callback_data="disconnect_gcal")])
@@ -2280,6 +2331,74 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
         return
     
+    elif waiting_for == 'edit_event_date':
+        pending_event = context.user_data.get('pending_event_preview')
+        if not pending_event:
+            await update.message.reply_text("❌ No event in progress. Please start over.")
+            context.user_data.pop('waiting_for', None)
+            return
+        try:
+            user_tz = get_user_timezone(chat_id) or DEFAULT_TZ
+            tz = pytz.timezone(user_tz)
+            now_local = datetime.now(tz)
+            start_dt = datetime.fromisoformat(pending_event['start_time'].replace('Z', '+00:00'))
+            if start_dt.tzinfo is None:
+                start_dt = pytz.utc.localize(start_dt)
+            start_local = start_dt.astimezone(tz)
+
+            # Re-parse the date input via AI
+            combined = f"{text} {start_local.strftime('%H:%M')}"
+            reparsed = await parse_with_ai(combined, user_tz, "en")
+            if not reparsed or reparsed.get('is_recurring_schedule'):
+                await update.message.reply_text(
+                    "❌ Couldn't understand the date. Try: <b>tomorrow</b>, <b>Mon</b>, <b>15 Sep</b>",
+                    parse_mode='HTML'
+                )
+                return
+
+            new_start = datetime.fromisoformat(reparsed['start_time'].replace('Z', '+00:00'))
+            if new_start.tzinfo is None:
+                new_start = pytz.utc.localize(new_start)
+            new_start_local = new_start.astimezone(tz).replace(
+                hour=start_local.hour, minute=start_local.minute, second=0, microsecond=0
+            )
+            # Preserve duration
+            end_dt = datetime.fromisoformat(pending_event['end_time'].replace('Z', '+00:00'))
+            if end_dt.tzinfo is None:
+                end_dt = pytz.utc.localize(end_dt)
+            duration = end_dt - start_dt
+            new_end_local = new_start_local + duration
+            pending_event['start_time'] = new_start_local.isoformat()
+            pending_event['end_time'] = new_end_local.isoformat()
+            context.user_data['waiting_for'] = 'event_confirmation'
+            preview_text = format_event_preview(pending_event)
+            await update.message.reply_text(preview_text, parse_mode='HTML', reply_markup=build_event_preview_buttons())
+        except Exception as e:
+            print(f"[Bot] Error editing event date: {e}")
+            await update.message.reply_text("❌ Couldn't update the date. Please try again.")
+        return
+
+    elif waiting_for == 'edit_event_description':
+        pending_event = context.user_data.get('pending_event_preview')
+        if not pending_event:
+            await update.message.reply_text("❌ No event in progress. Please start over.")
+            context.user_data.pop('waiting_for', None)
+            return
+        stripped = text.strip()
+        if stripped in ('-', 'none', 'clear', ''):
+            pending_event['description'] = ''
+        else:
+            try:
+                validated = _validate_user_input(stripped, "Description", max_length=1000)
+                pending_event['description'] = validated
+            except ValueError as e:
+                await update.message.reply_text(f"❌ {str(e)}")
+                return
+        context.user_data['waiting_for'] = 'event_confirmation'
+        preview_text = format_event_preview(pending_event)
+        await update.message.reply_text(preview_text, parse_mode='HTML', reply_markup=build_event_preview_buttons())
+        return
+
     # Обработка онбординга
     if context.chat_data.get('onboard_stage') == 'ask_name':
         if text.strip():
@@ -2613,7 +2732,20 @@ def format_event_preview(event_data: Dict[str, str]) -> str:
         preview += "📹 Google Meet link included\n"
 
     if description:
-        preview += f"\n📝 {description}"
+        preview += f"📝 {description}\n"
+
+    # Reminder
+    reminder_minutes = event_data.get('reminder_minutes')
+    if event_data.get('reminder_enabled') is False:
+        preview += "🔕 No reminder\n"
+    elif reminder_minutes is not None:
+        if reminder_minutes < 60:
+            rem_label = f"{reminder_minutes} min"
+        elif reminder_minutes % 60 == 0:
+            rem_label = f"{reminder_minutes // 60}h"
+        else:
+            rem_label = f"{reminder_minutes // 60}h {reminder_minutes % 60}min"
+        preview += f"🔔 Reminder: {rem_label} before\n"
 
     return preview
 
@@ -4093,6 +4225,45 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await query.message.reply_text("What would you like to do next?", reply_markup=build_main_menu())
         return
 
+    elif callback_data == "set_reminder":
+        await query.answer("")
+        track_event(chat_id, "settings_reminder_opened")
+        rem_en, rem_min = get_reminder_settings(chat_id)
+        opts = [5, 10, 15, 30, 60, 120]
+        rows = []
+        for m in opts:
+            mark = "✅ " if (rem_en and rem_min == m) else ""
+            label = f"{mark}{m} min" if m < 60 else f"{mark}{m//60}h"
+            rows.append(InlineKeyboardButton(label, callback_data=f"settings_reminder_{m}"))
+        kb = [rows[:3], rows[3:]]
+        off_mark = "✅ " if not rem_en else ""
+        kb.append([InlineKeyboardButton(f"{off_mark}🔕 Disable reminders", callback_data="settings_reminder_off")])
+        status = f"{rem_min} min before" if rem_en else "disabled"
+        await query.edit_message_text(
+            f"🔔 <b>Default Reminder</b>\nCurrent: {status}\n\nChoose how many minutes before the event to remind:",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(kb),
+        )
+        return
+
+    elif callback_data.startswith("settings_reminder_"):
+        await query.answer("")
+        val = callback_data[len("settings_reminder_"):]
+        if val == "off":
+            set_reminder_settings(chat_id, False, 30)
+            track_event(chat_id, "settings_reminder_disabled")
+            await query.edit_message_text("🔕 Reminders disabled.")
+        else:
+            try:
+                minutes = int(val)
+                set_reminder_settings(chat_id, True, minutes)
+                track_event(chat_id, "settings_reminder_set", {"minutes": minutes})
+                label = f"{minutes} min" if minutes < 60 else f"{minutes//60}h"
+                await query.edit_message_text(f"🔔 Default reminder set to {label} before event.")
+            except ValueError:
+                return
+        return
+
     elif callback_data == "set_duration":
         await query.answer("")
         track_event(chat_id, "settings_duration_opened")
@@ -4175,9 +4346,15 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await query.answer("")  # тихий ответ
         chat_id = query.message.chat_id
         track_event(chat_id, "event_edit_opened")
+        rem_en, rem_min = get_reminder_settings(chat_id)
+        event_data = context.user_data.get('pending_event_preview', {})
+        eff_rem = event_data.get('reminder_minutes', rem_min if rem_en else None)
         await query.edit_message_text(
             "What would you like to edit?",
-            reply_markup=build_edit_menu_buttons()
+            reply_markup=build_edit_menu_buttons(
+                reminder_minutes=eff_rem,
+                reminder_enabled=(eff_rem is not None),
+            )
         )
         context.user_data['waiting_for'] = 'event_edit_choice'
         return
@@ -4440,6 +4617,84 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             "🕐 Enter new time (e.g., 'Mon 21:00' or '14:30'):"
         )
         context.user_data['waiting_for'] = 'edit_event_time'
+        return
+
+    elif callback_data == "edit_date":
+        await query.answer("")
+        track_event(chat_id, "event_edit_date_started")
+        await query.edit_message_text(
+            "📅 Enter new date:\nExamples: <b>tomorrow</b>, <b>Mon</b>, <b>15 Sep</b>, <b>2026-09-20</b>",
+            parse_mode='HTML',
+        )
+        context.user_data['waiting_for'] = 'edit_event_date'
+        return
+
+    elif callback_data == "edit_description":
+        await query.answer("")
+        track_event(chat_id, "event_edit_description_started")
+        event_data = context.user_data.get('pending_event_preview', {})
+        current = event_data.get('description', '')
+        hint = f"\nCurrent: <i>{current}</i>" if current else ""
+        await query.edit_message_text(
+            f"📝 Enter description (or send a dash <b>-</b> to clear it):{hint}",
+            parse_mode='HTML',
+        )
+        context.user_data['waiting_for'] = 'edit_event_description'
+        return
+
+    elif callback_data == "edit_reminder":
+        await query.answer("")
+        track_event(chat_id, "event_edit_reminder_opened")
+        event_data = context.user_data.get('pending_event_preview', {})
+        rem_en, rem_min = get_reminder_settings(chat_id)
+        cur_reminder = event_data.get('reminder_minutes', rem_min if rem_en else None)
+        # Toggle or show options
+        opts = [5, 10, 15, 30, 60, 120]
+        rows = []
+        for m in opts:
+            mark = "✅ " if cur_reminder == m else ""
+            label = f"{mark}{m} min" if m < 60 else f"{mark}{m//60}h"
+            rows.append(InlineKeyboardButton(label, callback_data=f"set_reminder_{m}"))
+        kb = [rows[:3], rows[3:]]
+        off_mark = "✅ " if cur_reminder is None else ""
+        kb.append([InlineKeyboardButton(f"{off_mark}🔕 No reminder", callback_data="set_reminder_off")])
+        kb.append([InlineKeyboardButton("↩️ Back", callback_data="event_edit")])
+        await query.edit_message_text(
+            "🔔 Set reminder before event:",
+            reply_markup=InlineKeyboardMarkup(kb),
+        )
+        return
+
+    elif callback_data.startswith("set_reminder_"):
+        await query.answer("")
+        val = callback_data[len("set_reminder_"):]
+        event_data = context.user_data.get('pending_event_preview')
+        if not event_data:
+            return
+        if val == "off":
+            event_data.pop('reminder_minutes', None)
+            event_data['reminder_enabled'] = False
+            track_event(chat_id, "event_reminder_disabled")
+        else:
+            try:
+                minutes = int(val)
+                event_data['reminder_minutes'] = minutes
+                event_data['reminder_enabled'] = True
+                track_event(chat_id, "event_reminder_set", {"minutes": minutes})
+            except ValueError:
+                return
+        context.user_data['pending_event_preview'] = event_data
+        # Return to edit menu
+        rem_en, rem_min = get_reminder_settings(chat_id)
+        eff_rem = event_data.get('reminder_minutes') if event_data.get('reminder_enabled', True) else None
+        await query.edit_message_text(
+            "What would you like to edit?",
+            reply_markup=build_edit_menu_buttons(
+                reminder_minutes=eff_rem,
+                reminder_enabled=(eff_rem is not None),
+            ),
+        )
+        context.user_data['waiting_for'] = 'event_edit_choice'
         return
 
     elif callback_data == "cancel_edit":
@@ -5446,7 +5701,17 @@ async def _do_create_and_confirm(update: Update, context: ContextTypes.DEFAULT_T
     chat_id = update.effective_chat.id
     reply_fn = update.effective_message.reply_text
 
-    event_url = create_event(credentials, event_data)
+    # Determine reminder: event-level override > user default setting
+    rem_enabled, rem_minutes = get_reminder_settings(chat_id)
+    event_reminder = event_data.get("reminder_minutes")
+    if event_reminder is not None:
+        reminder_arg = int(event_reminder)  # explicit override from edit
+    elif rem_enabled:
+        reminder_arg = rem_minutes
+    else:
+        reminder_arg = None  # disabled
+
+    event_url = create_event(credentials, event_data, reminder_minutes=reminder_arg)
 
     if event_url:
         # Успешно создано — очищаем мусор перед отправкой финального сообщения

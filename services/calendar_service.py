@@ -235,7 +235,7 @@ def get_credentials_from_stored(user_id: int, stored_tokens: Dict) -> Optional[C
         return None
 
 
-def create_event(credentials: Credentials, event_data: Dict[str, str]) -> Optional[str]:
+def create_event(credentials: Credentials, event_data: Dict[str, str], reminder_minutes: int = None) -> Optional[str]:
     """
     Создает событие в Google Calendar.
     
@@ -275,6 +275,16 @@ def create_event(credentials: Credentials, event_data: Dict[str, str]) -> Option
         location = event_data.get("location", "")
         if location:
             event['location'] = location
+
+        # Reminders
+        event_reminder_minutes = event_data.get("reminder_minutes", reminder_minutes)
+        if event_reminder_minutes is not None and int(event_reminder_minutes) >= 0:
+            event['reminders'] = {
+                'useDefault': False,
+                'overrides': [{'method': 'popup', 'minutes': int(event_reminder_minutes)}],
+            }
+        else:
+            event['reminders'] = {'useDefault': True}
 
         # Attendees (meeting invites)
         attendees = event_data.get("attendees", [])
