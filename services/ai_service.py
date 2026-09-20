@@ -177,7 +177,17 @@ CRITICAL RULES:
                     "content": [
                         {
                             "type": "text",
-                            "text": f"Extract events from this image. User timezone: {user_timezone}. For single events, format times as ISO 8601 with timezone offset (e.g., 2026-02-16T14:30:00+01:00). For schedules/timetables, extract as day+time in HH:MM format. If unsure about timezone, use UTC (Z) or the provided timezone."
+                            "text": (
+                                f"Today's date: {datetime.now(pytz.timezone(user_timezone)).strftime('%Y-%m-%d')} "
+                                f"(timezone: {user_timezone}).\n"
+                                "Use this to resolve the correct year when only day+month are shown in the image "
+                                "(e.g. 'Sat 10 Oct' → find the nearest upcoming or current year where that date matches).\n\n"
+                                f"Extract events from this image. User timezone: {user_timezone}. "
+                                "For single events, format times as ISO 8601 with timezone offset "
+                                "(e.g., 2026-10-10T09:15:00+02:00). "
+                                "For schedules/timetables, extract as day+time in HH:MM format. "
+                                "If unsure about timezone, use the provided timezone offset."
+                            )
                         },
                         {
                             "type": "image_url",
